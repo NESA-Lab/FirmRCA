@@ -1,0 +1,17 @@
+autoscan: warning: missing AC_CHECK_HEADERS([fcntl.h]) wanted by: 
+	src/process_binary.c:8
+	src/process_core.c:8
+	src/access_memory.c:4
+autoscan: warning: missing AC_CHECK_HEADERS([malloc.h]) wanted by: 
+	src/instruction_resolver.c:3
+	src/reverse_log.c:4
+	src/reverse_execution.c:3
+	include/inst_data.h:6
+autoscan: warning: missing AC_CHECK_HEADERS([stdint.h]) wanted by: 
+	src/process_core.c:10
+autoscan: warning: missing AC_CHECK_HEADERS([unistd.h]) wanted by: 
+	src/process_binary.c:3
+	src/process_core.c:6
+	src/access_memory.c:3
+autoscan: warning: missing AC_PROG_INSTALL wanted by: 
+	autogen.sh:3

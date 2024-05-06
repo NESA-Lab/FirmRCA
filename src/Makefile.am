@@ -1,0 +1,6 @@
+SUBDIRS=src
+dist_doc_DATA=README
+
+TESTSUITES_DIR = testsuites
+EXECUTABLE=$(SUBDIRS)/reverse
+
