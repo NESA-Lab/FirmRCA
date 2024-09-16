@@ -1,17 +1,19 @@
 # FirmRCA
 
-Embedded Firmware Root Cause Analysis
+Embedded Firmware Root Cause Analysis.
+
+This repo contains the source code of the paper "FirmRCA: Towards Post-Fuzzing Analysis on ARM Embedded Firmware with Efficient Event-based Fault Localization"
 
 ## Note
 
-**This is a preview version in the review period.**
+**This is a preview version before camera-ready.**
 
 ## How to Install
 
 Step 1. Clone the repo.
 
 ```shell
-git clone https://github.com/FirmAnalyze/FirmRCA
+git clone https://github.com/NESA-Lab/FirmRCA
 cd ./FirmRCA
 ```
 
