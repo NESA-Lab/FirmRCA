@@ -1,3 +1,7 @@
+# NOTE
+
+**Due to some personal matters that require my attention, I will update this repository after June 1, 2025, with more information on emulation and dataset.**
+
 # FirmRCA
 
 Embedded Firmware Root Cause Analysis.
