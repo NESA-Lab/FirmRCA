@@ -1,0 +1,2951 @@
+diff -urN afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/afl-analyze.c afl/afl-analyze.c
+--- afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/afl-analyze.c	2020-01-07 20:20:26.000000000 +0100
++++ afl/afl-analyze.c	2022-01-13 02:40:51.926359942 +0100
+@@ -807,7 +807,8 @@
+        "  -f file       - input file read by the tested program (stdin)\n"
+        "  -t msec       - timeout for each run (%u ms)\n"
+        "  -m megs       - memory limit for child process (%u MB)\n"
+-       "  -Q            - use binary-only instrumentation (QEMU mode)\n\n"
++       "  -Q            - use binary-only instrumentation (QEMU mode)\n"
++       "  -U            - use unicorn-based instrumentation (Unicorn mode)\n\n"
+ 
+        "Analysis settings:\n\n"
+ 
+@@ -937,20 +938,19 @@
+ 
+ }
+ 
+-
+ /* Main entry point */
+ 
+ int main(int argc, char** argv) {
+ 
+   s32 opt;
+-  u8  mem_limit_given = 0, timeout_given = 0, qemu_mode = 0;
++  u8  mem_limit_given = 0, timeout_given = 0, qemu_mode = 0, unicorn_mode = 0;
+   char** use_argv;
+ 
+   doc_path = access(DOC_PATH, F_OK) ? "docs" : DOC_PATH;
+ 
+   SAYF(cCYA "afl-analyze " cBRI VERSION cRST " by <lcamtuf@google.com>\n");
+ 
+-  while ((opt = getopt(argc,argv,"+i:f:m:t:eQ")) > 0)
++  while ((opt = getopt(argc,argv,"+i:f:m:t:eQU")) > 0)
+ 
+     switch (opt) {
+ 
+@@ -1030,6 +1030,14 @@
+         qemu_mode = 1;
+         break;
+ 
++      case 'U':
++
++        if (unicorn_mode) FATAL("Multiple -U options not supported");
++        if (!mem_limit_given) mem_limit = MEM_LIMIT_UNICORN;
++
++        unicorn_mode = 1;
++        break;
++
+       default:
+ 
+         usage(argv[0]);
+diff -urN afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/afl-cmin afl/afl-cmin
+--- afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/afl-cmin	2020-01-07 20:20:26.000000000 +0100
++++ afl/afl-cmin	2022-01-13 02:40:51.926359942 +0100
+@@ -49,11 +49,11 @@
+ TIMEOUT=none
+ 
+ unset IN_DIR OUT_DIR STDIN_FILE EXTRA_PAR MEM_LIMIT_GIVEN \
+-  AFL_CMIN_CRASHES_ONLY AFL_CMIN_ALLOW_ANY QEMU_MODE
++  AFL_CMIN_CRASHES_ONLY AFL_CMIN_ALLOW_ANY QEMU_MODE UNICORN_MODE \
++  CONSISTENCY
+ 
+-while getopts "+i:o:f:m:t:eQC" opt; do
+-
+-  case "$opt" in 
++while getopts "+i:o:f:m:t:eQUCK" opt; do
++  case "$opt" in
+ 
+     "i")
+          IN_DIR="$OPTARG"
+@@ -83,10 +83,17 @@
+          test "$MEM_LIMIT_GIVEN" = "" && MEM_LIMIT=250
+          QEMU_MODE=1
+          ;;
++    "U")
++         EXTRA_PAR="$EXTRA_PAR -U"
++         test "$MEM_LIMIT_GIVEN" = "" && MEM_LIMIT=250
++         UNICORN_MODE=1
++         ;;
+     "?")
+          exit 1
+          ;;
+-
++    "K")
++         CONSISTENCY=1
++         ;;
+    esac
+ 
+ done
+@@ -111,6 +118,7 @@
+   -m megs       - memory limit for child process ($MEM_LIMIT MB)
+   -t msec       - run time limit for child process (none)
+   -Q            - use binary-only instrumentation (QEMU mode)
++  -U            - use unicorn-based instrumentation (Unicorn mode)
+ 
+ Minimization settings:
+ 
+@@ -196,7 +204,7 @@
+ 
+ fi
+ 
+-if [ "$AFL_SKIP_BIN_CHECK" = "" -a "$QEMU_MODE" = "" ]; then
++if [ "$AFL_SKIP_BIN_CHECK" = "" -a "$QEMU_MODE" = "" -a "$UNICORN_MODE" = "" ]; then
+ 
+   if ! grep -qF "__AFL_SHM_ID" "$TARGET_BIN"; then
+     echo "[-] Error: binary '$TARGET_BIN' doesn't appear to be instrumented." 1>&2
+@@ -307,32 +315,13 @@
+ 
+ (
+ 
+-  CUR=0
+-
+   if [ "$STDIN_FILE" = "" ]; then
+ 
+-    while read -r fn; do
+-
+-      CUR=$((CUR+1))
+-      printf "\\r    Processing file $CUR/$IN_COUNT... "
+-
+-      "$SHOWMAP" -m "$MEM_LIMIT" -t "$TIMEOUT" -o "$TRACE_DIR/$fn" -Z $EXTRA_PAR -- "$@" <"$IN_DIR/$fn"
+-
+-    done < <(ls "$IN_DIR")
++    "$SHOWMAP" -m "$MEM_LIMIT" -t "$TIMEOUT" -o "$TRACE_DIR" -i "$IN_DIR" -Z $EXTRA_PAR -- "$@" <"$IN_DIR/$fn"
+ 
+   else
+ 
+-    while read -r fn; do
+-
+-      CUR=$((CUR+1))
+-      printf "\\r    Processing file $CUR/$IN_COUNT... "
+-
+-      cp "$IN_DIR/$fn" "$STDIN_FILE"
+-
+-      "$SHOWMAP" -m "$MEM_LIMIT" -t "$TIMEOUT" -o "$TRACE_DIR/$fn" -Z $EXTRA_PAR -A "$STDIN_FILE" -- "$@" </dev/null
+-
+-    done < <(ls "$IN_DIR")
+-
++    "$SHOWMAP" -m "$MEM_LIMIT" -t "$TIMEOUT" -o "$TRACE_DIR" -i "$IN_DIR" -Z $EXTRA_PAR -A "$STDIN_FILE" -- "$@" </dev/null
+ 
+   fi
+ 
+@@ -456,6 +445,8 @@
+ echo "[+] Narrowed down to $OUT_COUNT files, saved in '$OUT_DIR'."
+ echo
+ 
+-test "$AFL_KEEP_TRACES" = "" && rm -rf "$TRACE_DIR"
++if [ "$CONSISTENCY" != "1" ]; then
++  test "$AFL_KEEP_TRACES" = "" && rm -rf "$TRACE_DIR"
++fi
+ 
+ exit 0
+diff -urN afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/afl-fuzz.c afl/afl-fuzz.c
+--- afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/afl-fuzz.c	2020-01-07 20:20:26.000000000 +0100
++++ afl/afl-fuzz.c	2022-01-13 02:40:51.926359942 +0100
+@@ -1,5 +1,5 @@
+ /*
+-   american fuzzy lop - fuzzer code
++   American Fuzzy Lop - fuzzer code
+    --------------------------------
+ 
+    Written and maintained by Michal Zalewski <lcamtuf@google.com>
+@@ -56,6 +56,8 @@
+ #include <sys/ioctl.h>
+ #include <sys/file.h>
+ 
++#include <assert.h>
++
+ #if defined(__APPLE__) || defined(__FreeBSD__) || defined (__OpenBSD__)
+ #  include <sys/sysctl.h>
+ #endif /* __APPLE__ || __FreeBSD__ || __OpenBSD__ */
+@@ -118,6 +120,7 @@
+            shuffle_queue,             /* Shuffle input queue?             */
+            bitmap_changed = 1,        /* Time to update bitmap?           */
+            qemu_mode,                 /* Running in QEMU mode?            */
++           unicorn_mode,              /* Running in Unicorn mode?         */
+            skip_requested,            /* Skip request, via SIGUSR1        */
+            run_over10m,               /* Run time over 10 minutes?        */
+            persistent_mode,           /* Running in persistent mode?      */
+@@ -476,31 +479,62 @@
+ 
+   closedir(d);
+ 
+-  for (i = 0; i < cpu_core_count; i++) if (!cpu_used[i]) break;
++  int bound = 0;
++  int tried_bind = 0;
++  int saved_errno = 0;
+ 
+-  if (i == cpu_core_count) {
++  for (i = 0; i < cpu_core_count; i++) {
+ 
+-    SAYF("\n" cLRD "[-] " cRST
+-         "Uh-oh, looks like all %u CPU cores on your system are allocated to\n"
+-         "    other instances of afl-fuzz (or similar CPU-locked tasks). Starting\n"
+-         "    another fuzzer on this machine is probably a bad plan, but if you are\n"
+-         "    absolutely sure, you can set AFL_NO_AFFINITY and try again.\n",
+-         cpu_core_count);
++    if (!cpu_used[i]) {
++
++      OKF("Found a free CPU core, attempting bind to #%u.", i);
++
++      CPU_ZERO(&c);
++      CPU_SET(i, &c);
++
++      if (sched_setaffinity(0, sizeof(c), &c)) {
+ 
+-    FATAL("No more free CPU cores");
++        saved_errno = errno;
++        tried_bind++;
++        WARNF("Binding attempt failed; looking for another core...");
++
++      } else {
++
++        cpu_aff = i;
++        bound = 1;
++        break;
+ 
++      }
++    }
+   }
+ 
+-  OKF("Found a free CPU core, binding to #%u.", i);
++  if (!bound) {
++
++    if (tried_bind == 0) {
++
++      SAYF("\n" cLRD "[-] " cRST
++           "Uh-oh, looks like all %u CPU cores on your system are allocated to\n"
++           "    other instances of afl-fuzz (or similar CPU-locked tasks). Starting\n"
++           "    another fuzzer on this machine is probably a bad plan, but if you are\n"
++           "    absolutely sure, you can set AFL_NO_AFFINITY and try again.\n\n",
++           cpu_core_count);
++      FATAL("No more free CPU cores");
+ 
+-  cpu_aff = i;
++    } else {
+ 
+-  CPU_ZERO(&c);
+-  CPU_SET(i, &c);
++      SAYF("\n" cLRD "[-] " cRST
++           "Uh-oh, afl-fuzz found %u apparently free CPU cores, but the system\n"
++           "    wouldn't let us bind to any of them. This can happen if we do not\n"
++           "    have CAP_SYS_NICE, or if we are running in a container that is\n"
++           "    restricted to a certain set of CPUs that already have processes bound\n"
++           "    to them. For a quick workaround, set AFL_NO_AFFINITY and try again.\n",
++           tried_bind);
+ 
+-  if (sched_setaffinity(0, sizeof(c), &c))
+-    PFATAL("sched_setaffinity failed");
++      errno = saved_errno;
++      PFATAL("sched_setaffinity failed");
+ 
++    }
++  }
+ }
+ 
+ #endif /* HAVE_AFFINITY */
+@@ -1990,6 +2024,8 @@
+ 
+   if (!forksrv_pid) {
+ 
++    /* CHILD PROCESS */
++
+     struct rlimit r;
+ 
+     /* Umpf. On OpenBSD, the default fd limit for root users is set to
+@@ -2035,8 +2071,23 @@
+ 
+     setsid();
+ 
+-    dup2(dev_null_fd, 1);
+-    dup2(dev_null_fd, 2);
++    if (getenv("AFL_LOG_TARGET_OUTPUT")) {
++      /* Log target output to a file */
++      char *log_path;
++      int log_fd;
++      assert(asprintf(&log_path, "%s/%s", out_dir, "log.txt") > 0);
++      ACTF("Logging is enabled, logging to %s\n", log_path);
++      log_fd = open(log_path, O_RDWR | O_CREAT | O_TRUNC, S_IRWXU);
++      assert(log_fd >= 0);
++      free(log_path);
++      dup2(log_fd, 1);
++      dup2(log_fd, 2);
++      close(log_fd);
++    } else {
++      dup2(dev_null_fd, 1);
++      dup2(dev_null_fd, 2);
++    }
++
+ 
+     if (out_file) {
+ 
+@@ -2095,6 +2146,8 @@
+ 
+   }
+ 
++  /* PARENT PROCESS */
++
+   /* Close the unneeded endpoints. */
+ 
+   close(ctl_pipe[0]);
+@@ -3429,7 +3482,7 @@
+              "exec_timeout      : %u\n"
+              "afl_banner        : %s\n"
+              "afl_version       : " VERSION "\n"
+-             "target_mode       : %s%s%s%s%s%s%s\n"
++             "target_mode       : %s%s%s%s%s%s%s%s\n"
+              "command_line      : %s\n",
+              start_time / 1000, get_cur_time() / 1000, getpid(),
+              queue_cycle ? (queue_cycle - 1) : 0, total_execs, eps,
+@@ -3439,10 +3492,10 @@
+              unique_hangs, last_path_time / 1000, last_crash_time / 1000,
+              last_hang_time / 1000, total_execs - last_crash_execs,
+              exec_tmout, use_banner,
+-             qemu_mode ? "qemu " : "", dumb_mode ? " dumb " : "",
++             unicorn_mode ? "unicorn" : "", qemu_mode ? "qemu " : "", dumb_mode ? " dumb " : "",
+              no_forkserver ? "no_forksrv " : "", crash_mode ? "crash " : "",
+              persistent_mode ? "persistent " : "", deferred_mode ? "deferred " : "",
+-             (qemu_mode || dumb_mode || no_forkserver || crash_mode ||
++             (unicorn_mode || qemu_mode || dumb_mode || no_forkserver || crash_mode ||
+               persistent_mode || deferred_mode) ? "" : "default",
+              orig_cmdline);
+              /* ignore errors */
+@@ -4366,7 +4419,7 @@
+ 
+   SAYF("\n");
+ 
+-  if (avg_us > (qemu_mode ? 50000 : 10000)) 
++  if (avg_us > ((qemu_mode || unicorn_mode) ? 50000 : 10000)) 
+     WARNF(cLRD "The target binary is pretty slow! See %s/perf_tips.txt.",
+           doc_path);
+ 
+@@ -6901,7 +6954,7 @@
+ 
+ #endif /* ^!__APPLE__ */
+ 
+-  if (!qemu_mode && !dumb_mode &&
++  if (!qemu_mode && !unicorn_mode && !dumb_mode &&
+       !memmem(f_data, f_len, SHM_ENV_VAR, strlen(SHM_ENV_VAR) + 1)) {
+ 
+     SAYF("\n" cLRD "[-] " cRST
+@@ -6921,15 +6974,15 @@
+ 
+   }
+ 
+-  if (qemu_mode &&
++  if ((qemu_mode || unicorn_mode) &&
+       memmem(f_data, f_len, SHM_ENV_VAR, strlen(SHM_ENV_VAR) + 1)) {
+ 
+     SAYF("\n" cLRD "[-] " cRST
+          "This program appears to be instrumented with afl-gcc, but is being run in\n"
+-         "    QEMU mode (-Q). This is probably not what you want - this setup will be\n"
+-         "    slow and offer no practical benefits.\n");
++         "    QEMU or Unicorn mode (-Q or -U). This is probably not what you want -\n"
++         "    this setup will be slow and offer no practical benefits.\n");
+ 
+-    FATAL("Instrumentation found in -Q mode");
++    FATAL("Instrumentation found in -Q or -U mode");
+ 
+   }
+ 
+@@ -7054,8 +7107,9 @@
+        "  -f file       - location read by the fuzzed program (stdin)\n"
+        "  -t msec       - timeout for each run (auto-scaled, 50-%u ms)\n"
+        "  -m megs       - memory limit for child process (%u MB)\n"
+-       "  -Q            - use binary-only instrumentation (QEMU mode)\n\n"     
+- 
++       "  -Q            - use binary-only instrumentation (QEMU mode)\n"     
++       "  -U            - use Unicorn-based instrumentation (Unicorn mode)\n\n"
++
+        "Fuzzing behavior settings:\n\n"
+ 
+        "  -d            - quick & dirty mode (skips deterministic steps)\n"
+@@ -7598,7 +7652,10 @@
+ }
+ 
+ 
+-/* Rewrite argv for QEMU. */
++/* Rewrite argv for QEMU.
++   Specifically, this changes the command call to:
++       $ {AFL_PATH}/afl-qemu-trace -- {target_bin} {test_input_path and args} 
++ */
+ 
+ static char** get_qemu_argv(u8* own_loc, char** argv, int argc) {
+ 
+@@ -7670,7 +7727,6 @@
+ 
+ }
+ 
+-
+ /* Make a copy of the current command line. */
+ 
+ static void save_cmdline(u32 argc, char** argv) {
+@@ -7723,7 +7779,7 @@
+   gettimeofday(&tv, &tz);
+   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
+ 
+-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:Q")) > 0)
++  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QU")) > 0)
+ 
+     switch (opt) {
+ 
+@@ -7891,6 +7947,15 @@
+ 
+         break;
+ 
++      case 'U': /* Unicorn mode */
++
++        if (unicorn_mode) FATAL("Multiple -U options not supported");
++        unicorn_mode = 1;
++
++        if (!mem_limit_given) mem_limit = MEM_LIMIT_UNICORN;
++
++        break;
++
+       default:
+ 
+         usage(argv[0]);
+@@ -7909,8 +7974,9 @@
+ 
+   if (dumb_mode) {
+ 
+-    if (crash_mode) FATAL("-C and -n are mutually exclusive");
+-    if (qemu_mode)  FATAL("-Q and -n are mutually exclusive");
++    if (crash_mode)   FATAL("-C and -n are mutually exclusive");
++    if (qemu_mode)    FATAL("-Q and -n are mutually exclusive");
++    if (unicorn_mode) FATAL("-U and -n are mutually exclusive");
+ 
+   }
+ 
+diff -urN afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/afl-showmap.c afl/afl-showmap.c
+--- afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/afl-showmap.c	2020-01-07 20:20:26.000000000 +0100
++++ afl/afl-showmap.c	2022-01-13 02:40:51.926359942 +0100
+@@ -46,11 +46,16 @@
+ #include <sys/types.h>
+ #include <sys/resource.h>
+ 
+-static s32 child_pid;                 /* PID of the tested program         */
++static s32 forksrv_pid,               /* PID of the fork server           */
++           child_pid;                 /* PID of the tested program         */
++
++static s32 fsrv_ctl_fd,               /* Fork server control pipe (write) */
++           fsrv_st_fd;                /* Fork server status pipe (read)   */
+ 
+ static u8* trace_bits;                /* SHM with instrumentation bitmap   */
+ 
+-static u8 *out_file,                  /* Trace output file                 */
++static u8 *out_path,                  /* Trace output file / dir           */
++          *in_path,                   /* Program input file / dir          */
+           *doc_path,                  /* Path to docs                      */
+           *target_path,               /* Path to target binary             */
+           *at_file;                   /* Substitution string for @@        */
+@@ -61,12 +66,20 @@
+ 
+ static s32 shm_id;                    /* ID of the SHM region              */
+ 
++static s32 at_file_fd,                    /* Persistent fd for tmp_input_file        */
++           dev_null_fd = -1;          /* Persistent fd for /dev/null       */
++
+ static u8  quiet_mode,                /* Hide non-essential messages?      */
+            edges_only,                /* Ignore hit counts?                */
+            cmin_mode,                 /* Generate output in afl-cmin mode? */
+            binary_mode,               /* Write output as a binary map      */
+            keep_cores;                /* Allow coredumps?                  */
+ 
++static u8  batch_mode,
++           no_output,
++           using_file_arg,
++           allocated_at_file;
++
+ static volatile u8
+            stop_soon,                 /* Ctrl-C pressed?                   */
+            child_timed_out,           /* Child timed out?                  */
+@@ -103,6 +116,19 @@
+ 
+ };
+ 
++struct queue_entry {
++    struct queue_entry *next;
++    u8 *in_path;
++    u32 in_len;
++    u8 *out_path;
++};
++
++/* Append new test case to the queue. */
++struct queue_entry *queue_top = 0;
++struct queue_entry *queue = 0;
++int queued_paths = 0;
++
++
+ static void classify_counts(u8* mem, const u8* map) {
+ 
+   u32 i = MAP_SIZE;
+@@ -159,31 +185,115 @@
+ 
+ }
+ 
+-/* Write results. */
++static void setup_at_file(void) {
++    u8 *use_dir = ".";
+ 
+-static u32 write_results(void) {
++    if (access(use_dir, R_OK | W_OK | X_OK))
++    {
+ 
+-  s32 fd;
+-  u32 i, ret = 0;
++        use_dir = getenv("TMPDIR");
++        if (!use_dir)
++            use_dir = "/tmp";
++    }
+ 
+-  u8  cco = !!getenv("AFL_CMIN_CRASHES_ONLY"),
+-      caa = !!getenv("AFL_CMIN_ALLOW_ANY");
++    at_file = alloc_printf("%s/.afl-showmap-temp-%u", use_dir, getpid());
+ 
+-  if (!strncmp(out_file, "/dev/", 5)) {
++    unlink(at_file);
+ 
+-    fd = open(out_file, O_WRONLY, 0600);
+-    if (fd < 0) PFATAL("Unable to open '%s'", out_file);
++    at_file_fd = open(at_file, O_RDWR | O_CREAT | O_EXCL, 0600);
+ 
+-  } else if (!strcmp(out_file, "-")) {
++    if (at_file_fd < 0) PFATAL("Unable to create '%s'", at_file);
+ 
+-    fd = dup(1);
+-    if (fd < 0) PFATAL("Unable to open stdout");
++    allocated_at_file = 1;
++}
+ 
+-  } else {
+ 
+-    unlink(out_file); /* Ignore errors */
+-    fd = open(out_file, O_WRONLY | O_CREAT | O_EXCL, 0600);
+-    if (fd < 0) PFATAL("Unable to create '%s'", out_file);
++#define CHK_FORMAT(_divisor, _limit_mult, _fmt, _cast) do { \
++    if (val < (_divisor) * (_limit_mult)) { \
++      sprintf(tmp[cur], _fmt, ((_cast)val) / (_divisor)); \
++      return tmp[cur]; \
++    } \
++  } while (0)
++
++
++/* Describe integer as memory size. */
++
++static u8* DMS(u64 val) {
++
++  static u8 tmp[12][16];
++  static u8 cur;
++
++  cur = (cur + 1) % 12;
++
++  /* 0-9999 */
++  CHK_FORMAT(1, 10000, "%llu B", u64);
++
++  /* 10.0k - 99.9k */
++  CHK_FORMAT(1024, 99.95, "%0.01f kB", double);
++
++  /* 100k - 999k */
++  CHK_FORMAT(1024, 1000, "%llu kB", u64);
++
++  /* 1.00M - 9.99M */
++  CHK_FORMAT(1024 * 1024, 9.995, "%0.02f MB", double);
++
++  /* 10.0M - 99.9M */
++  CHK_FORMAT(1024 * 1024, 99.95, "%0.01f MB", double);
++
++  /* 100M - 999M */
++  CHK_FORMAT(1024 * 1024, 1000, "%llu MB", u64);
++
++  /* 1.00G - 9.99G */
++  CHK_FORMAT(1024LL * 1024 * 1024, 9.995, "%0.02f GB", double);
++
++  /* 10.0G - 99.9G */
++  CHK_FORMAT(1024LL * 1024 * 1024, 99.95, "%0.01f GB", double);
++
++  /* 100G - 999G */
++  CHK_FORMAT(1024LL * 1024 * 1024, 1000, "%llu GB", u64);
++
++  /* 1.00T - 9.99G */
++  CHK_FORMAT(1024LL * 1024 * 1024 * 1024, 9.995, "%0.02f TB", double);
++
++  /* 10.0T - 99.9T */
++  CHK_FORMAT(1024LL * 1024 * 1024 * 1024, 99.95, "%0.01f TB", double);
++
++#undef CHK_FORMAT
++
++  /* 100T+ */
++  strcpy(tmp[cur], "infty");
++  return tmp[cur];
++
++}
++
++
++/* Write results. */
++
++static u32 write_results(u8 *out_path) {
++
++  s32 fd;
++  u32 i, ret = 0;
++    if(no_output) {
++        return 0;
++    }
++
++    u8 cco = !!getenv("AFL_CMIN_CRASHES_ONLY"),
++       caa = !!getenv("AFL_CMIN_ALLOW_ANY");
++
++    if (!strncmp(out_path, "/dev/", 5))
++    {
++
++        fd = open(out_path, O_WRONLY, 0600);
++        if (fd < 0)
++            PFATAL("Unable to open '%s'", out_path);
++
++  } else
++  {
++
++      unlink(out_path); /* Ignore errors */
++      fd = open(out_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
++      if (fd < 0)
++          PFATAL("Unable to create '%s'", out_path);
+ 
+   }
+ 
+@@ -193,7 +303,7 @@
+     for (i = 0; i < MAP_SIZE; i++)
+       if (trace_bits[i]) ret++;
+     
+-    ck_write(fd, trace_bits, MAP_SIZE, out_file);
++    ck_write(fd, trace_bits, MAP_SIZE, out_path);
+     close(fd);
+ 
+   } else {
+@@ -222,8 +332,7 @@
+ 
+   }
+ 
+-  return ret;
+-
++    return ret;
+ }
+ 
+ 
+@@ -242,64 +351,89 @@
+ static void run_target(char** argv) {
+ 
+   static struct itimerval it;
++  static u32 prev_timed_out = 0;
+   int status = 0;
+ 
+   if (!quiet_mode)
+     SAYF("-- Program output begins --\n" cRST);
+ 
++  memset(trace_bits, 0, MAP_SIZE);
+   MEM_BARRIER();
+ 
+-  child_pid = fork();
++  s32 res;
+ 
+-  if (child_pid < 0) PFATAL("fork() failed");
++  if (in_path) {
++    /* we have the fork server up and running, so simply
++        tell it to have at it, and then read back PID. */
+ 
+-  if (!child_pid) {
++    if ((res = write(fsrv_ctl_fd, &prev_timed_out, 4)) != 4) {
+ 
+-    struct rlimit r;
++        if (stop_soon) return;
++        RPFATAL(res, "Unable to request new process from fork server (OOM?)");
+ 
+-    if (quiet_mode) {
++    }
+ 
+-      s32 fd = open("/dev/null", O_RDWR);
++    if ((res = read(fsrv_st_fd, &child_pid, 4)) != 4) {
+ 
+-      if (fd < 0 || dup2(fd, 1) < 0 || dup2(fd, 2) < 0) {
+-        *(u32*)trace_bits = EXEC_FAIL_SIG;
+-        PFATAL("Descriptor initialization failed");
+-      }
+-
+-      close(fd);
++        if (stop_soon) return;
++        RPFATAL(res, "Unable to request new process from fork server (OOM?)");
+ 
+     }
+ 
+-    if (mem_limit) {
++    if (child_pid <= 0) FATAL("Fork server is misbehaving (OOM?)");
++  } else {
++      child_pid = fork();
+ 
+-      r.rlim_max = r.rlim_cur = ((rlim_t)mem_limit) << 20;
++        if (child_pid < 0) PFATAL("fork() failed");
+ 
+-#ifdef RLIMIT_AS
++        if (!child_pid) {
+ 
+-      setrlimit(RLIMIT_AS, &r); /* Ignore errors */
++            struct rlimit r;
+ 
+-#else
++            if (quiet_mode) {
+ 
+-      setrlimit(RLIMIT_DATA, &r); /* Ignore errors */
++            s32 fd = open("/dev/null", O_RDWR);
+ 
+-#endif /* ^RLIMIT_AS */
++            if (fd < 0 || dup2(fd, 1) < 0 || dup2(fd, 2) < 0) {
++                *(u32*)trace_bits = EXEC_FAIL_SIG;
++                PFATAL("Descriptor initialization failed");
++            }
+ 
+-    }
++            close(fd);
+ 
+-    if (!keep_cores) r.rlim_max = r.rlim_cur = 0;
+-    else r.rlim_max = r.rlim_cur = RLIM_INFINITY;
++            }
+ 
+-    setrlimit(RLIMIT_CORE, &r); /* Ignore errors */
++            if (mem_limit) {
+ 
+-    if (!getenv("LD_BIND_LAZY")) setenv("LD_BIND_NOW", "1", 0);
++            r.rlim_max = r.rlim_cur = ((rlim_t)mem_limit) << 20;
+ 
+-    setsid();
++        #ifdef RLIMIT_AS
+ 
+-    execv(target_path, argv);
++            setrlimit(RLIMIT_AS, &r); /* Ignore errors */
+ 
+-    *(u32*)trace_bits = EXEC_FAIL_SIG;
+-    exit(0);
++        #else
++
++            setrlimit(RLIMIT_DATA, &r); /* Ignore errors */
++
++        #endif /* ^RLIMIT_AS */
++
++            }
++
++            if (!keep_cores) r.rlim_max = r.rlim_cur = 0;
++            else r.rlim_max = r.rlim_cur = RLIM_INFINITY;
++
++            setrlimit(RLIMIT_CORE, &r); /* Ignore errors */
++
++            if (!getenv("LD_BIND_LAZY")) setenv("LD_BIND_NOW", "1", 0);
+ 
++            setsid();
++
++            execv(target_path, argv);
++
++            *(u32*)trace_bits = EXEC_FAIL_SIG;
++            exit(0);
++
++        }
+   }
+ 
+   /* Configure timeout, wait for child, cancel timeout. */
+@@ -314,7 +448,16 @@
+ 
+   setitimer(ITIMER_REAL, &it, NULL);
+ 
+-  if (waitpid(child_pid, &status, 0) <= 0) FATAL("waitpid() failed");
++    if(in_path) {
++        if ((res = read(fsrv_st_fd, &status, 4)) != 4) {
++
++            if (stop_soon) return;
++            RPFATAL(res, "Unable to communicate with fork server (OOM?)");
++
++        }
++  } else {
++      if (waitpid(child_pid, &status, 0) <= 0) FATAL("waitpid() failed");
++  }
+ 
+   child_pid = 0;
+   it.it_value.tv_sec = 0;
+@@ -427,24 +570,32 @@
+     u8* aa_loc = strstr(argv[i], "@@");
+ 
+     if (aa_loc) {
++        using_file_arg = 1;
+ 
+-      u8 *aa_subst, *n_arg;
++        u8 *aa_subst, *n_arg;
+ 
+-      if (!at_file) FATAL("@@ syntax is not supported by this tool.");
++        if (!in_path && !at_file)
++            FATAL("@@ syntax is not supported by this tool.");
+ 
+-      /* Be sure that we're always using fully-qualified paths. */
++        if (!at_file)
++            setup_at_file();
+ 
+-      if (at_file[0] == '/') aa_subst = at_file;
+-      else aa_subst = alloc_printf("%s/%s", cwd, at_file);
++        /* Be sure that we're always using fully-qualified paths. */
+ 
+-      /* Construct a replacement argv value. */
++        if (at_file[0] == '/')
++            aa_subst = at_file;
++        else
++            aa_subst = alloc_printf("%s/%s", cwd, at_file);
+ 
+-      *aa_loc = 0;
+-      n_arg = alloc_printf("%s%s%s", argv[i], aa_subst, aa_loc + 2);
+-      argv[i] = n_arg;
+-      *aa_loc = '@';
++        /* Construct a replacement argv value. */
+ 
+-      if (at_file[0] != '/') ck_free(aa_subst);
++        *aa_loc = 0;
++        n_arg = alloc_printf("%s%s%s", argv[i], aa_subst, aa_loc + 2);
++        argv[i] = n_arg;
++        *aa_loc = '@';
++
++        if (at_file[0] != '/')
++            ck_free(aa_subst);
+ 
+     }
+ 
+@@ -475,13 +626,16 @@
+ 
+        "Required parameters:\n\n"
+ 
+-       "  -o file       - file to write the trace data to\n\n"
++       "  -i file       - file or dir to get inputs from\n"
++       "  -o file       - file or dir to write the trace data to. Use '-' for no output\n\n"
+ 
+        "Execution control settings:\n\n"
+ 
+        "  -t msec       - timeout for each run (none)\n"
+        "  -m megs       - memory limit for child process (%u MB)\n"
+-       "  -Q            - use binary-only instrumentation (QEMU mode)\n\n"
++       "  -Q            - use binary-only instrumentation (QEMU mode)\n"
++       "  -U            - use Unicorn-based instrumentation (Unicorn mode)\n"
++       "                  (Not necessary, here for consistency with other afl-* tools)\n\n"  
+ 
+        "Other settings:\n\n"
+ 
+@@ -615,25 +769,499 @@
+ }
+ 
+ 
++/* Spin up fork server (instrumented mode only). The idea is explained here:
++
++   http://lcamtuf.blogspot.com/2014/10/fuzzing-binaries-without-execve.html
++
++   In essence, the instrumentation allows us to skip execve(), and just keep
++   cloning a stopped child. So, we just execute once, and then send commands
++   through a pipe. The other part of this logic is in afl-as.h. */
++
++static void init_forkserver(char** argv) {
++
++  static struct itimerval it;
++  int st_pipe[2], ctl_pipe[2];
++  int status;
++  s32 rlen;
++
++  ACTF("Spinning up the fork server...");
++
++  if (pipe(st_pipe) || pipe(ctl_pipe))
++      PFATAL("pipe() failed");
++
++  forksrv_pid = fork();
++
++  if (forksrv_pid < 0) PFATAL("fork() failed");
++
++  if (!forksrv_pid) {
++
++    struct rlimit r;
++
++    /* Umpf. On OpenBSD, the default fd limit for root users is set to
++       soft 128. Let's try to fix that... */
++
++    if (!getrlimit(RLIMIT_NOFILE, &r) && r.rlim_cur < FORKSRV_FD + 2) {
++
++      r.rlim_cur = FORKSRV_FD + 2;
++      setrlimit(RLIMIT_NOFILE, &r); /* Ignore errors */
++
++    }
++
++    if (mem_limit) {
++
++      r.rlim_max = r.rlim_cur = ((rlim_t)mem_limit) << 20;
++
++#ifdef RLIMIT_AS
++
++      setrlimit(RLIMIT_AS, &r); /* Ignore errors */
++
++#else
++
++      /* This takes care of OpenBSD, which doesn't have RLIMIT_AS, but
++         according to reliable sources, RLIMIT_DATA covers anonymous
++         maps - so we should be getting good protection against OOM bugs. */
++
++      setrlimit(RLIMIT_DATA, &r); /* Ignore errors */
++
++#endif /* ^RLIMIT_AS */
++
++
++    }
++
++    /* Dumping cores is slow and can lead to anomalies if SIGKILL is delivered
++       before the dump is complete. */
++
++    r.rlim_max = r.rlim_cur = 0;
++
++    setrlimit(RLIMIT_CORE, &r); /* Ignore errors */
++
++    /* Isolate the process and configure standard descriptors. If at_path is
++       specified, stdin is /dev/null; otherwise, at_file_fd is cloned instead. */
++
++    setsid();
++
++    dup2(dev_null_fd, 1);
++    dup2(dev_null_fd, 2);
++
++    if (using_file_arg) {
++        dup2(dev_null_fd, 0);
++    } else {
++
++        dup2(at_file_fd, 0);
++        close(at_file_fd);
++
++    }
++
++    /* Set up control and status pipes, close the unneeded original fds. */
++
++    if (dup2(ctl_pipe[0], FORKSRV_FD) < 0) PFATAL("dup2() failed");
++    if (dup2(st_pipe[1], FORKSRV_FD + 1) < 0) PFATAL("dup2() failed");
++
++    close(ctl_pipe[0]);
++    close(ctl_pipe[1]);
++    close(st_pipe[0]);
++    close(st_pipe[1]);
++
++    close(dev_null_fd);
++
++    /* This should improve performance a bit, since it stops the linker from
++       doing extra work post-fork(). */
++
++    if (!getenv("LD_BIND_LAZY")) setenv("LD_BIND_NOW", "1", 0);
++
++    /* Set sane defaults for ASAN if nothing else specified. */
++
++    setenv("ASAN_OPTIONS", "abort_on_error=1:"
++                           "detect_leaks=0:"
++                           "symbolize=0:"
++                           "allocator_may_return_null=1", 0);
++
++    /* MSAN is tricky, because it doesn't support abort_on_error=1 at this
++       point. So, we do this in a very hacky way. */
++
++    setenv("MSAN_OPTIONS", "exit_code=" STRINGIFY(MSAN_ERROR) ":"
++                           "symbolize=0:"
++                           "abort_on_error=1:"
++                           "allocator_may_return_null=1:"
++                           "msan_track_origins=0", 0);
++
++    execv(target_path, argv);
++
++    /* Use a distinctive bitmap signature to tell the parent about execv()
++       falling through. */
++
++    *(u32*)trace_bits = EXEC_FAIL_SIG;
++    exit(0);
++
++  }
++
++  /* Close the unneeded endpoints. */
++
++  close(ctl_pipe[0]);
++  close(st_pipe[1]);
++
++  fsrv_ctl_fd = ctl_pipe[1];
++  fsrv_st_fd  = st_pipe[0];
++
++  /* Wait for the fork server to come up, but don't wait too long. */
++
++  it.it_value.tv_sec = ((exec_tmout * FORK_WAIT_MULT) / 1000);
++  it.it_value.tv_usec = ((exec_tmout * FORK_WAIT_MULT) % 1000) * 1000;
++
++  setitimer(ITIMER_REAL, &it, NULL);
++
++  rlen = read(fsrv_st_fd, &status, 4);
++
++  it.it_value.tv_sec = 0;
++  it.it_value.tv_usec = 0;
++
++  setitimer(ITIMER_REAL, &it, NULL);
++
++  /* If we have a four-byte "hello" message from the server, we're all set.
++     Otherwise, try to figure out what went wrong. */
++
++  if (rlen == 4) {
++      OKF("All right - fork server is up.");
++      return;
++  }
++
++  if (child_timed_out)
++    FATAL("Timeout while initializing fork server (adjusting -t may help)");
++
++  if (waitpid(forksrv_pid, &status, 0) <= 0) {
++      PFATAL("waitpid() failed");
++  }
++
++  if (WIFSIGNALED(status)) {
++
++    /*if (mem_limit && mem_limit < 500 && uses_asan) {
++
++      SAYF("\n" cLRD "[-] " cRST
++           "Whoops, the target binary crashed suddenly, before receiving any input\n"
++           "    from the fuzzer! Since it seems to be built with ASAN and you have a\n"
++           "    restrictive memory limit configured, this is expected; please read\n"
++           "    %s/notes_for_asan.txt for help.\n", doc_path);
++
++    } else */if (!mem_limit) {
++
++      SAYF("\n" cLRD "[-] " cRST
++           "Whoops, the target binary crashed suddenly, before receiving any input\n"
++           "    from the fuzzer! There are several probable explanations:\n\n"
++
++           "    - The binary is just buggy and explodes entirely on its own. If so, you\n"
++           "      need to fix the underlying problem or find a better replacement.\n\n"
++
++#ifdef __APPLE__
++
++           "    - On MacOS X, the semantics of fork() syscalls are non-standard and may\n"
++           "      break afl-fuzz performance optimizations when running platform-specific\n"
++           "      targets. To fix this, set AFL_NO_FORKSRV=1 in the environment.\n\n"
++
++#endif /* __APPLE__ */
++
++           "    - Less likely, there is a horrible bug in the fuzzer. If other options\n"
++           "      fail, poke <lcamtuf@coredump.cx> for troubleshooting tips.\n");
++
++    } else {
++
++      SAYF("\n" cLRD "[-] " cRST
++           "Whoops, the target binary crashed suddenly, before receiving any input\n"
++           "    from the fuzzer! There are several probable explanations:\n\n"
++
++           "    - The current memory limit (%s) is too restrictive, causing the\n"
++           "      target to hit an OOM condition in the dynamic linker. Try bumping up\n"
++           "      the limit with the -m setting in the command line. A simple way confirm\n"
++           "      this diagnosis would be:\n\n"
++
++#ifdef RLIMIT_AS
++           "      ( ulimit -Sv $[%llu << 10]; /path/to/fuzzed_app )\n\n"
++#else
++           "      ( ulimit -Sd $[%llu << 10]; /path/to/fuzzed_app )\n\n"
++#endif /* ^RLIMIT_AS */
++
++           "      Tip: you can use http://jwilk.net/software/recidivm to quickly\n"
++           "      estimate the required amount of virtual memory for the binary.\n\n"
++
++           "    - The binary is just buggy and explodes entirely on its own. If so, you\n"
++           "      need to fix the underlying problem or find a better replacement.\n\n"
++
++#ifdef __APPLE__
++
++           "    - On MacOS X, the semantics of fork() syscalls are non-standard and may\n"
++           "      break afl-fuzz performance optimizations when running platform-specific\n"
++           "      targets. To fix this, set AFL_NO_FORKSRV=1 in the environment.\n\n"
++
++#endif /* __APPLE__ */
++
++           "    - Less likely, there is a horrible bug in the fuzzer. If other options\n"
++           "      fail, poke <lcamtuf@coredump.cx> for troubleshooting tips.\n",
++           DMS(mem_limit << 20), mem_limit - 1);
++
++    }
++
++    FATAL("Fork server crashed with signal %d", WTERMSIG(status));
++
++  }
++
++  if (*(u32*)trace_bits == EXEC_FAIL_SIG)
++    FATAL("Unable to execute target application ('%s')", argv[0]);
++
++  /*if (mem_limit && mem_limit < 500 && uses_asan) {
++
++    SAYF("\n" cLRD "[-] " cRST
++           "Hmm, looks like the target binary terminated before we could complete a\n"
++           "    handshake with the injected code. Since it seems to be built with ASAN and\n"
++           "    you have a restrictive memory limit configured, this is expected; please\n"
++           "    read %s/notes_for_asan.txt for help.\n", doc_path);
++
++  } else */if (!mem_limit) {
++
++    SAYF("\n" cLRD "[-] " cRST
++         "Hmm, looks like the target binary terminated before we could complete a\n"
++         "    handshake with the injected code. Perhaps there is a horrible bug in the\n"
++         "    fuzzer. Poke <lcamtuf@coredump.cx> for troubleshooting tips.\n");
++
++  } else {
++
++    SAYF("\n" cLRD "[-] " cRST
++         "Hmm, looks like the target binary terminated before we could complete a\n"
++         "    handshake with the injected code. There are %s probable explanations:\n\n"
++
++         "%s"
++         "    - The current memory limit (%s) is too restrictive, causing an OOM\n"
++         "      fault in the dynamic linker. This can be fixed with the -m option. A\n"
++         "      simple way to confirm the diagnosis may be:\n\n"
++
++#ifdef RLIMIT_AS
++         "      ( ulimit -Sv $[%llu << 10]; /path/to/fuzzed_app )\n\n"
++#else
++         "      ( ulimit -Sd $[%llu << 10]; /path/to/fuzzed_app )\n\n"
++#endif /* ^RLIMIT_AS */
++
++         "      Tip: you can use http://jwilk.net/software/recidivm to quickly\n"
++         "      estimate the required amount of virtual memory for the binary.\n\n"
++
++         "    - Less likely, there is a horrible bug in the fuzzer. If other options\n"
++         "      fail, poke <lcamtuf@coredump.cx> for troubleshooting tips.\n",
++         getenv(DEFER_ENV_VAR) ? "three" : "two",
++         getenv(DEFER_ENV_VAR) ?
++         "    - You are using deferred forkserver, but __AFL_INIT() is never\n"
++         "      reached before the program terminates.\n\n" : "",
++         DMS(mem_limit << 20), mem_limit - 1);
++
++  }
++
++  FATAL("Fork server handshake failed");
++
++}
++
++
++/* Write modified data to file for testing. If using_file_arg is set, the old file
++   is unlinked and a new one is created. Otherwise, at_file_fd is rewound and
++   truncated. */
++
++static void write_to_testcase(u8* mem, u32 len) {
++
++  s32 fd = at_file_fd;
++
++  // SAYF("Writing to testcase: at_path='%s', mem='%s', len=%d\n", at_path, mem, len);
++
++  if (using_file_arg) {
++
++    unlink(at_file); /* Ignore errors. */
++
++    fd = open(at_file, O_WRONLY | O_CREAT | O_EXCL, 0600);
++
++    if (fd < 0) PFATAL("Unable to create '%s'", at_file);
++
++  } else lseek(fd, 0, SEEK_SET);
++
++  ck_write(fd, mem, len, at_file);
++
++  if (!using_file_arg) {
++
++    if (ftruncate(fd, len)) PFATAL("ftruncate() failed");
++    lseek(fd, 0, SEEK_SET);
++
++  } else close(fd);
++
++}
++
++static void do_testcase(char **argv, struct queue_entry *q) {
++    u8* use_mem;
++    s32 fd;
++
++    fd = open(q->in_path, O_RDONLY);
++    if (fd < 0) PFATAL("Unable to open '%s'", q->in_path);
++
++    use_mem = ck_alloc_nozero(q->in_len);
++
++    if (read(fd, use_mem, q->in_len) != q->in_len)
++    FATAL("Short read from '%s'", q->in_path);
++
++    close(fd);
++
++    write_to_testcase(use_mem, q->in_len);
++    ck_free(use_mem);
++
++    if (stop_soon) return;
++        child_crashed = 0;
++        run_target(argv);
++        if(!child_crashed) {
++            write_results(q->out_path);
++        }
++    }
++
++static void add_to_queue(u8 *in_path, u32 in_len, u8 *out_path)
++{
++  struct queue_entry *q = ck_alloc(sizeof(struct queue_entry));
++
++    q->in_path = in_path;
++  q->in_len = in_len;
++  q->out_path = out_path;
++
++  if (queue_top)
++  {
++     q->next = queue_top;
++     queue_top = q;
++  } else queue = queue_top = q;
++
++  queued_paths++;
++}
++
++/* Read all testcases from the input directory, then queue them for testing.
++   Called at startup. */
++
++static void read_testcases(u8 *in_dir, u8 *out_dir) {
++
++  struct dirent **nl;
++  s32 nl_cnt;
++  u32 i;
++
++  ACTF("Scanning '%s'...", in_dir);
++
++  /* We use scandir() + alphasort() rather than readdir() because otherwise,
++     the ordering  of test cases would vary somewhat randomly and would be
++     difficult to control. */
++
++  nl_cnt = scandir(in_dir, &nl, NULL, alphasort);
++
++  if (nl_cnt < 0) {
++
++    if (errno == ENOENT || errno == ENOTDIR)
++
++    PFATAL("Unable to open '%s'", in_dir);
++
++  }
++
++  for (i = 0; i < nl_cnt; i++) {
++
++    struct stat st;
++
++    u8* ifn = alloc_printf("%s/%s", in_dir, nl[i]->d_name);
++    u8* ofn = alloc_printf("%s/%s", out_dir, nl[i]->d_name);
++
++    free(nl[i]); /* not tracked */
++ 
++    if (lstat(ifn, &st) || access(ifn, R_OK))
++      PFATAL("Unable to access '%s'", ifn);
++
++    /* This also takes care of . and .. */
++
++    if (!S_ISREG(st.st_mode) || !st.st_size || strstr(ifn, "/README.txt")) {
++
++      ck_free(ifn);
++      ck_free(ofn);
++      continue;
++
++    }
++
++    if (st.st_size > MAX_FILE) 
++      FATAL("Test case '%s' is too big (%s, limit is %s)", ifn,
++            DMS(st.st_size), DMS(MAX_FILE));
++
++    add_to_queue(ifn, st.st_size, ofn);
++  }
++
++  free(nl); /* not tracked */
++
++  if (!queued_paths) {
++
++    SAYF("\n" cLRD "[-] " cRST
++         "Looks like there are no valid test cases in the input directory! The fuzzer\n"
++         "    needs one or more test case to start with - ideally, a small file under\n"
++         "    1 kB or so. The cases must be stored as regular files directly in the\n"
++         "    input directory.\n");
++
++    FATAL("No usable test cases in '%s'", in_dir);
++
++  }
++
++}
++
++void build_job_queue(u8 *in_path, u8 *out_path) {
++    struct stat in_path_stat;
++    struct stat out_path_stat;
++
++    if(stat(in_path, &in_path_stat) == -1) {
++        FATAL("Cannot open input path '%s'", in_path);
++    }
++    batch_mode = S_ISDIR(in_path_stat.st_mode);
++
++    if(!batch_mode && (!S_ISREG(in_path_stat.st_mode) || access(in_path, F_OK))) {
++        FATAL("Cannot open input path or no regular file '%s'", in_path);
++    }
++    
++    if(out_path) {
++        if (stat(out_path, &out_path_stat) == 0){
++            if (batch_mode != S_ISDIR(out_path_stat.st_mode)) {
++                FATAL("Output target type and batch mode do not match");
++            }
++        } else if(batch_mode) {
++            mkdir(out_path, 0700);
++        }
++    }
++
++    if(batch_mode) {
++
++        read_testcases(in_path, out_path);
++
++    } else {
++
++        // single entry
++        u8* ifn = alloc_printf("%s", in_path);
++        u8* ofn = alloc_printf("%s", out_path);
++
++        add_to_queue(ifn, in_path_stat.st_size, ofn);
++    }
++}
++
+ /* Main entry point */
+ 
+ int main(int argc, char** argv) {
+ 
+   s32 opt;
+-  u8  mem_limit_given = 0, timeout_given = 0, qemu_mode = 0;
+-  u32 tcnt;
++  u8  mem_limit_given = 0, timeout_given = 0, qemu_mode = 0, unicorn_mode = 0;
+   char** use_argv;
+ 
+   doc_path = access(DOC_PATH, F_OK) ? "docs" : DOC_PATH;
+ 
+-  while ((opt = getopt(argc,argv,"+o:m:t:A:eqZQbc")) > 0)
++  while ((opt = getopt(argc,argv,"+i:+o:m:t:A:eqZQUbc")) > 0)
+ 
+     switch (opt) {
+ 
++      case 'i': /* input dir */
++
++        if (in_path) FATAL("Multiple -i options not supported");
++            in_path = optarg;
++        
++            break;
++
+       case 'o':
+ 
+-        if (out_file) FATAL("Multiple -o options not supported");
+-        out_file = optarg;
++        if (out_path) FATAL("Multiple -o options not supported");
++        out_path = optarg;
++        
+         break;
+ 
+       case 'm': {
+@@ -723,6 +1351,14 @@
+         qemu_mode = 1;
+         break;
+ 
++      case 'U':
++
++        if (unicorn_mode) FATAL("Multiple -U options not supported");
++        if (!mem_limit_given) mem_limit = MEM_LIMIT_UNICORN;
++
++        unicorn_mode = 1;
++        break;
++
+       case 'b':
+ 
+         /* Secret undocumented mode. Writes output in raw binary format
+@@ -738,23 +1374,22 @@
+         break;
+ 
+       default:
+-
+         usage(argv[0]);
+-
+     }
+ 
+-  if (optind == argc || !out_file) usage(argv[0]);
++  if (optind == argc) usage(argv[0]);
++  
++  if ( !out_path )
++      no_output = 1;
+ 
+   setup_shm();
+   setup_signal_handlers();
+-
+   set_up_environment();
+-
+   find_binary(argv[optind]);
+-
++  
+   if (!quiet_mode) {
+-    show_banner();
+-    ACTF("Executing '%s'...\n", target_path);
++      show_banner();
++      ACTF("Executing '%s'...\n", target_path);
+   }
+ 
+   detect_file_args(argv + optind);
+@@ -763,18 +1398,46 @@
+     use_argv = get_qemu_argv(argv[0], argv + optind, argc - optind);
+   else
+     use_argv = argv + optind;
+-
+-  run_target(use_argv);
+-
+-  tcnt = write_results();
+-
+-  if (!quiet_mode) {
+-
+-    if (!tcnt) FATAL("No instrumentation detected" cRST);
+-    OKF("Captured %u tuples in '%s'." cRST, tcnt, out_file);
+-
++  if(in_path) {
++      build_job_queue(in_path, out_path);
++      
++      if(!at_file) {
++        setup_at_file();
++      }
++      
++      init_forkserver(use_argv);
++      
++      struct queue_entry *entry;
++      while (queued_paths-- != 0)
++      {
++        do_testcase(argv, queue_top);
++    
++        ck_free(queue_top->in_path);
++        ck_free(queue_top->out_path);
++        
++        entry = queue_top;
++        queue_top = queue_top->next;
++        ck_free(entry);
++    
++      }      
++      unlink(at_file);
++      if (allocated_at_file)
++      {
++        ck_free(at_file);
++      }
++  } else {
++      
++      // stdin used as input, normal operation
++      run_target(use_argv);
++      
++      u32 tcnt = write_results(out_path);
++      
++      if(!quiet_mode) {
++        if (!tcnt) FATAL("No instrumentation detected" cRST);
++        OKF("Captured %u tuples in '%s'." cRST, tcnt, out_path);
++      }
+   }
+-
++  
+   exit(child_crashed * 2 + child_timed_out);
+ 
+ }
+diff -urN afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/afl-tmin.c afl/afl-tmin.c
+--- afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/afl-tmin.c	2020-01-07 20:20:26.000000000 +0100
++++ afl/afl-tmin.c	2022-01-13 02:40:51.926359942 +0100
+@@ -44,7 +44,11 @@
+ #include <sys/types.h>
+ #include <sys/resource.h>
+ 
+-static s32 child_pid;                 /* PID of the tested program         */
++static s32 forksrv_pid,               /* PID of the fork server           */
++           child_pid;                 /* PID of the tested program        */
++
++static s32 fsrv_ctl_fd,               /* Fork server control pipe (write) */
++           fsrv_st_fd;                /* Fork server status pipe (read)   */
+ 
+ static u8 *trace_bits,                /* SHM with instrumentation bitmap   */
+           *mask_bitmap;               /* Mask for trace bits (-B)          */
+@@ -68,7 +72,8 @@
+ static u64 mem_limit = MEM_LIMIT;     /* Memory limit (MB)                 */
+ 
+ static s32 shm_id,                    /* ID of the SHM region              */
+-           dev_null_fd = -1;          /* FD to /dev/null                   */
++           dev_null_fd = -1,          /* FD to /dev/null                   */
++           prog_in_fd;                /* Persistent fd for out_file        */
+ 
+ static u8  crash_mode,                /* Crash-centric mode?               */
+            exit_crash,                /* Treat non-zero exit as crash?     */
+@@ -153,6 +158,159 @@
+ }
+ 
+ 
++/* Describe integer. Uses 12 cyclic static buffers for return values. The value
++   returned should be five characters or less for all the integers we reasonably
++   expect to see. */
++
++static u8* DI(u64 val) {
++
++  static u8 tmp[12][16];
++  static u8 cur;
++
++  cur = (cur + 1) % 12;
++
++#define CHK_FORMAT(_divisor, _limit_mult, _fmt, _cast) do { \
++    if (val < (_divisor) * (_limit_mult)) { \
++      sprintf(tmp[cur], _fmt, ((_cast)val) / (_divisor)); \
++      return tmp[cur]; \
++    } \
++  } while (0)
++
++  /* 0-9999 */
++  CHK_FORMAT(1, 10000, "%llu", u64);
++
++  /* 10.0k - 99.9k */
++  CHK_FORMAT(1000, 99.95, "%0.01fk", double);
++
++  /* 100k - 999k */
++  CHK_FORMAT(1000, 1000, "%lluk", u64);
++
++  /* 1.00M - 9.99M */
++  CHK_FORMAT(1000 * 1000, 9.995, "%0.02fM", double);
++
++  /* 10.0M - 99.9M */
++  CHK_FORMAT(1000 * 1000, 99.95, "%0.01fM", double);
++
++  /* 100M - 999M */
++  CHK_FORMAT(1000 * 1000, 1000, "%lluM", u64);
++
++  /* 1.00G - 9.99G */
++  CHK_FORMAT(1000LL * 1000 * 1000, 9.995, "%0.02fG", double);
++
++  /* 10.0G - 99.9G */
++  CHK_FORMAT(1000LL * 1000 * 1000, 99.95, "%0.01fG", double);
++
++  /* 100G - 999G */
++  CHK_FORMAT(1000LL * 1000 * 1000, 1000, "%lluG", u64);
++
++  /* 1.00T - 9.99G */
++  CHK_FORMAT(1000LL * 1000 * 1000 * 1000, 9.995, "%0.02fT", double);
++
++  /* 10.0T - 99.9T */
++  CHK_FORMAT(1000LL * 1000 * 1000 * 1000, 99.95, "%0.01fT", double);
++
++  /* 100T+ */
++  strcpy(tmp[cur], "infty");
++  return tmp[cur];
++
++}
++
++
++/* Describe float. Similar to the above, except with a single 
++   static buffer. */
++
++static u8* DF(double val) {
++
++  static u8 tmp[16];
++
++  if (val < 99.995) {
++    sprintf(tmp, "%0.02f", val);
++    return tmp;
++  }
++
++  if (val < 999.95) {
++    sprintf(tmp, "%0.01f", val);
++    return tmp;
++  }
++
++  return DI((u64)val);
++
++}
++
++
++/* Describe integer as memory size. */
++
++static u8* DMS(u64 val) {
++
++  static u8 tmp[12][16];
++  static u8 cur;
++
++  cur = (cur + 1) % 12;
++
++  /* 0-9999 */
++  CHK_FORMAT(1, 10000, "%llu B", u64);
++
++  /* 10.0k - 99.9k */
++  CHK_FORMAT(1024, 99.95, "%0.01f kB", double);
++
++  /* 100k - 999k */
++  CHK_FORMAT(1024, 1000, "%llu kB", u64);
++
++  /* 1.00M - 9.99M */
++  CHK_FORMAT(1024 * 1024, 9.995, "%0.02f MB", double);
++
++  /* 10.0M - 99.9M */
++  CHK_FORMAT(1024 * 1024, 99.95, "%0.01f MB", double);
++
++  /* 100M - 999M */
++  CHK_FORMAT(1024 * 1024, 1000, "%llu MB", u64);
++
++  /* 1.00G - 9.99G */
++  CHK_FORMAT(1024LL * 1024 * 1024, 9.995, "%0.02f GB", double);
++
++  /* 10.0G - 99.9G */
++  CHK_FORMAT(1024LL * 1024 * 1024, 99.95, "%0.01f GB", double);
++
++  /* 100G - 999G */
++  CHK_FORMAT(1024LL * 1024 * 1024, 1000, "%llu GB", u64);
++
++  /* 1.00T - 9.99G */
++  CHK_FORMAT(1024LL * 1024 * 1024 * 1024, 9.995, "%0.02f TB", double);
++
++  /* 10.0T - 99.9T */
++  CHK_FORMAT(1024LL * 1024 * 1024 * 1024, 99.95, "%0.01f TB", double);
++
++#undef CHK_FORMAT
++
++  /* 100T+ */
++  strcpy(tmp[cur], "infty");
++  return tmp[cur];
++
++}
++
++
++/* Describe time delta. Returns one static buffer, 34 chars of less. */
++
++static u8* DTD(u64 cur_ms, u64 event_ms) {
++
++  static u8 tmp[64];
++  u64 delta;
++  s32 t_d, t_h, t_m, t_s;
++
++  if (!event_ms) return "none seen yet";
++
++  delta = cur_ms - event_ms;
++
++  t_d = delta / 1000 / 60 / 60 / 24;
++  t_h = (delta / 1000 / 60 / 60) % 24;
++  t_m = (delta / 1000 / 60) % 60;
++  t_s = (delta / 1000) % 60;
++
++  sprintf(tmp, "%s days, %u hrs, %u min, %u sec", DI(t_d), t_h, t_m, t_s);
++  return tmp;
++
++}
++
+ 
+ /* Get rid of shared memory and temp files (atexit handler). */
+ 
+@@ -237,6 +395,36 @@
+ }
+ 
+ 
++/* Write modified data to file for testing. If use_stdin is not set, the old file
++   is unlinked and a new one is created. Otherwise, prog_in_fd is rewound and
++   truncated. */
++
++static void write_to_testcase(void* mem, u32 len) {
++
++  s32 fd = prog_in_fd;
++
++  if (!use_stdin) {
++
++    unlink(prog_in); /* Ignore errors. */
++
++    fd = open(prog_in, O_WRONLY | O_CREAT | O_EXCL, 0600);
++
++    if (fd < 0) PFATAL("Unable to create '%s'", prog_in);
++
++  } else lseek(fd, 0, SEEK_SET);
++
++  ck_write(fd, mem, len, prog_in);
++
++  if (use_stdin) {
++
++    if (ftruncate(fd, len)) PFATAL("ftruncate() failed");
++    lseek(fd, 0, SEEK_SET);
++
++  } else close(fd);
++
++}
++
++
+ /* Handle timeout signal. */
+ 
+ static void handle_timeout(int sig) {
+@@ -246,44 +434,42 @@
+ 
+ }
+ 
++/* Spin up fork server (instrumented mode only). The idea is explained here:
+ 
+-/* Execute target application. Returns 0 if the changes are a dud, or
+-   1 if they should be kept. */
++   http://lcamtuf.blogspot.com/2014/10/fuzzing-binaries-without-execve.html
+ 
+-static u8 run_target(char** argv, u8* mem, u32 len, u8 first_run) {
++   In essence, the instrumentation allows us to skip execve(), and just keep
++   cloning a stopped child. So, we just execute once, and then send commands
++   through a pipe. The other part of this logic is in afl-as.h. */
+ 
+-  static struct itimerval it;
+-  int status = 0;
++static void init_forkserver(char** argv) {
+ 
+-  s32 prog_in_fd;
+-  u32 cksum;
++  static struct itimerval it;
++  int st_pipe[2], ctl_pipe[2];
++  int status;
++  s32 rlen;
+ 
+-  memset(trace_bits, 0, MAP_SIZE);
+-  MEM_BARRIER();
++  ACTF("Spinning up the fork server...");
+ 
+-  prog_in_fd = write_to_file(prog_in, mem, len);
++  if (pipe(st_pipe) || pipe(ctl_pipe)) PFATAL("pipe() failed");
+ 
+-  child_pid = fork();
++  forksrv_pid = fork();
+ 
+-  if (child_pid < 0) PFATAL("fork() failed");
++  if (forksrv_pid < 0) PFATAL("fork() failed");
+ 
+-  if (!child_pid) {
++  if (!forksrv_pid) {
+ 
+     struct rlimit r;
+ 
+-    if (dup2(use_stdin ? prog_in_fd : dev_null_fd, 0) < 0 ||
+-        dup2(dev_null_fd, 1) < 0 ||
+-        dup2(dev_null_fd, 2) < 0) {
++    /* Umpf. On OpenBSD, the default fd limit for root users is set to
++       soft 128. Let's try to fix that... */
+ 
+-      *(u32*)trace_bits = EXEC_FAIL_SIG;
+-      PFATAL("dup2() failed");
++    if (!getrlimit(RLIMIT_NOFILE, &r) && r.rlim_cur < FORKSRV_FD + 2) {
+ 
+-    }
+-
+-    close(dev_null_fd);
+-    close(prog_in_fd);
++      r.rlim_cur = FORKSRV_FD + 2;
++      setrlimit(RLIMIT_NOFILE, &r); /* Ignore errors */
+ 
+-    setsid();
++    }
+ 
+     if (mem_limit) {
+ 
+@@ -295,23 +481,281 @@
+ 
+ #else
+ 
++      /* This takes care of OpenBSD, which doesn't have RLIMIT_AS, but
++         according to reliable sources, RLIMIT_DATA covers anonymous
++         maps - so we should be getting good protection against OOM bugs. */
++
+       setrlimit(RLIMIT_DATA, &r); /* Ignore errors */
+ 
+ #endif /* ^RLIMIT_AS */
+ 
++
+     }
+ 
++    /* Dumping cores is slow and can lead to anomalies if SIGKILL is delivered
++       before the dump is complete. */
++
+     r.rlim_max = r.rlim_cur = 0;
++
+     setrlimit(RLIMIT_CORE, &r); /* Ignore errors */
+ 
++    /* Isolate the process and configure standard descriptors. If out_file is
++       specified, stdin is /dev/null; otherwise, out_fd is cloned instead. */
++
++    setsid();
++
++    dup2(dev_null_fd, 1);
++    dup2(dev_null_fd, 2);
++
++    if (out_file) {
++        dup2(dev_null_fd, 0);
++    } else {
++
++        dup2(prog_in_fd, 0);
++        close(prog_in_fd);
++
++    }
++
++    /* Set up control and status pipes, close the unneeded original fds. */
++
++    if (dup2(ctl_pipe[0], FORKSRV_FD) < 0) PFATAL("dup2() failed");
++    if (dup2(st_pipe[1], FORKSRV_FD + 1) < 0) PFATAL("dup2() failed");
++
++    close(ctl_pipe[0]);
++    close(ctl_pipe[1]);
++    close(st_pipe[0]);
++    close(st_pipe[1]);
++
++    close(dev_null_fd);
++
++    /* This should improve performance a bit, since it stops the linker from
++       doing extra work post-fork(). */
++
++    if (!getenv("LD_BIND_LAZY")) setenv("LD_BIND_NOW", "1", 0);
++
++    /* Set sane defaults for ASAN if nothing else specified. */
++
++    setenv("ASAN_OPTIONS", "abort_on_error=1:"
++                           "detect_leaks=0:"
++                           "symbolize=0:"
++                           "allocator_may_return_null=1", 0);
++
++    /* MSAN is tricky, because it doesn't support abort_on_error=1 at this
++       point. So, we do this in a very hacky way. */
++
++    setenv("MSAN_OPTIONS", "exit_code=" STRINGIFY(MSAN_ERROR) ":"
++                           "symbolize=0:"
++                           "abort_on_error=1:"
++                           "allocator_may_return_null=1:"
++                           "msan_track_origins=0", 0);
++
+     execv(target_path, argv);
+ 
++    /* Use a distinctive bitmap signature to tell the parent about execv()
++       falling through. */
++
+     *(u32*)trace_bits = EXEC_FAIL_SIG;
+     exit(0);
+ 
+   }
+ 
+-  close(prog_in_fd);
++  /* Close the unneeded endpoints. */
++
++  close(ctl_pipe[0]);
++  close(st_pipe[1]);
++
++  fsrv_ctl_fd = ctl_pipe[1];
++  fsrv_st_fd  = st_pipe[0];
++
++  /* Wait for the fork server to come up, but don't wait too long. */
++
++  it.it_value.tv_sec = ((exec_tmout * FORK_WAIT_MULT) / 1000);
++  it.it_value.tv_usec = ((exec_tmout * FORK_WAIT_MULT) % 1000) * 1000;
++
++  setitimer(ITIMER_REAL, &it, NULL);
++
++  rlen = read(fsrv_st_fd, &status, 4);
++
++  it.it_value.tv_sec = 0;
++  it.it_value.tv_usec = 0;
++
++  setitimer(ITIMER_REAL, &it, NULL);
++
++  /* If we have a four-byte "hello" message from the server, we're all set.
++     Otherwise, try to figure out what went wrong. */
++
++  if (rlen == 4) {
++    OKF("All right - fork server is up.");
++    return;
++  }
++
++  if (child_timed_out)
++    FATAL("Timeout while initializing fork server (adjusting -t may help)");
++
++  if (waitpid(forksrv_pid, &status, 0) <= 0)
++    PFATAL("waitpid() failed");
++
++  if (WIFSIGNALED(status)) {
++
++    /*if (mem_limit && mem_limit < 500 && uses_asan) {
++
++      SAYF("\n" cLRD "[-] " cRST
++           "Whoops, the target binary crashed suddenly, before receiving any input\n"
++           "    from the fuzzer! Since it seems to be built with ASAN and you have a\n"
++           "    restrictive memory limit configured, this is expected; please read\n"
++           "    %s/notes_for_asan.txt for help.\n", doc_path);
++
++    } else */if (!mem_limit) {
++
++      SAYF("\n" cLRD "[-] " cRST
++           "Whoops, the target binary crashed suddenly, before receiving any input\n"
++           "    from the fuzzer! There are several probable explanations:\n\n"
++
++           "    - The binary is just buggy and explodes entirely on its own. If so, you\n"
++           "      need to fix the underlying problem or find a better replacement.\n\n"
++
++#ifdef __APPLE__
++
++           "    - On MacOS X, the semantics of fork() syscalls are non-standard and may\n"
++           "      break afl-fuzz performance optimizations when running platform-specific\n"
++           "      targets. To fix this, set AFL_NO_FORKSRV=1 in the environment.\n\n"
++
++#endif /* __APPLE__ */
++
++           "    - Less likely, there is a horrible bug in the fuzzer. If other options\n"
++           "      fail, poke <lcamtuf@coredump.cx> for troubleshooting tips.\n");
++
++    } else {
++
++      SAYF("\n" cLRD "[-] " cRST
++           "Whoops, the target binary crashed suddenly, before receiving any input\n"
++           "    from the fuzzer! There are several probable explanations:\n\n"
++
++           "    - The current memory limit (%s) is too restrictive, causing the\n"
++           "      target to hit an OOM condition in the dynamic linker. Try bumping up\n"
++           "      the limit with the -m setting in the command line. A simple way confirm\n"
++           "      this diagnosis would be:\n\n"
++
++#ifdef RLIMIT_AS
++           "      ( ulimit -Sv $[%llu << 10]; /path/to/fuzzed_app )\n\n"
++#else
++           "      ( ulimit -Sd $[%llu << 10]; /path/to/fuzzed_app )\n\n"
++#endif /* ^RLIMIT_AS */
++
++           "      Tip: you can use http://jwilk.net/software/recidivm to quickly\n"
++           "      estimate the required amount of virtual memory for the binary.\n\n"
++
++           "    - The binary is just buggy and explodes entirely on its own. If so, you\n"
++           "      need to fix the underlying problem or find a better replacement.\n\n"
++
++#ifdef __APPLE__
++
++           "    - On MacOS X, the semantics of fork() syscalls are non-standard and may\n"
++           "      break afl-fuzz performance optimizations when running platform-specific\n"
++           "      targets. To fix this, set AFL_NO_FORKSRV=1 in the environment.\n\n"
++
++#endif /* __APPLE__ */
++
++           "    - Less likely, there is a horrible bug in the fuzzer. If other options\n"
++           "      fail, poke <lcamtuf@coredump.cx> for troubleshooting tips.\n",
++           DMS(mem_limit << 20), mem_limit - 1);
++
++    }
++
++    FATAL("Fork server crashed with signal %d", WTERMSIG(status));
++
++  }
++
++  if (*(u32*)trace_bits == EXEC_FAIL_SIG)
++    FATAL("Unable to execute target application ('%s')", argv[0]);
++
++  /*if (mem_limit && mem_limit < 500 && uses_asan) {
++
++    SAYF("\n" cLRD "[-] " cRST
++           "Hmm, looks like the target binary terminated before we could complete a\n"
++           "    handshake with the injected code. Since it seems to be built with ASAN and\n"
++           "    you have a restrictive memory limit configured, this is expected; please\n"
++           "    read %s/notes_for_asan.txt for help.\n", doc_path);
++
++  } else */if (!mem_limit) {
++
++    SAYF("\n" cLRD "[-] " cRST
++         "Hmm, looks like the target binary terminated before we could complete a\n"
++         "    handshake with the injected code. Perhaps there is a horrible bug in the\n"
++         "    fuzzer. Poke <lcamtuf@coredump.cx> for troubleshooting tips.\n");
++
++  } else {
++
++    SAYF("\n" cLRD "[-] " cRST
++         "Hmm, looks like the target binary terminated before we could complete a\n"
++         "    handshake with the injected code. There are %s probable explanations:\n\n"
++
++         "%s"
++         "    - The current memory limit (%s) is too restrictive, causing an OOM\n"
++         "      fault in the dynamic linker. This can be fixed with the -m option. A\n"
++         "      simple way to confirm the diagnosis may be:\n\n"
++
++#ifdef RLIMIT_AS
++         "      ( ulimit -Sv $[%llu << 10]; /path/to/fuzzed_app )\n\n"
++#else
++         "      ( ulimit -Sd $[%llu << 10]; /path/to/fuzzed_app )\n\n"
++#endif /* ^RLIMIT_AS */
++
++         "      Tip: you can use http://jwilk.net/software/recidivm to quickly\n"
++         "      estimate the required amount of virtual memory for the binary.\n\n"
++
++         "    - Less likely, there is a horrible bug in the fuzzer. If other options\n"
++         "      fail, poke <lcamtuf@coredump.cx> for troubleshooting tips.\n",
++         getenv(DEFER_ENV_VAR) ? "three" : "two",
++         getenv(DEFER_ENV_VAR) ?
++         "    - You are using deferred forkserver, but __AFL_INIT() is never\n"
++         "      reached before the program terminates.\n\n" : "",
++         DMS(mem_limit << 20), mem_limit - 1);
++
++  }
++
++  FATAL("Fork server handshake failed");
++
++}
++
++
++/* Execute target application. Returns 0 if the changes are a dud, or
++   1 if they should be kept. */
++
++static u8 run_target(char** argv, u8* mem, u32 len, u8 first_run) {
++
++  static struct itimerval it;
++  static u32 prev_timed_out = 0;
++  int status = 0;
++
++  u32 cksum;
++
++  memset(trace_bits, 0, MAP_SIZE);
++  MEM_BARRIER();
++
++  write_to_testcase(mem, len);
++
++  s32 res;
++
++  /* In non-dumb mode, we have the fork server up and running, so simply
++     tell it to have at it, and then read back PID. */
++
++  if ((res = write(fsrv_ctl_fd, &prev_timed_out, 4)) != 4) {
++
++      if (stop_soon) return 0;
++      RPFATAL(res, "Unable to request new process from fork server (OOM?)");
++
++  }
++
++  if ((res = read(fsrv_st_fd, &child_pid, 4)) != 4) {
++
++      if (stop_soon) return 0;
++      RPFATAL(res, "Unable to request new process from fork server (OOM?)");
++
++  }
++
++  if (child_pid <= 0) FATAL("Fork server is misbehaving (OOM?)");
++
+ 
+   /* Configure timeout, wait for child, cancel timeout. */
+ 
+@@ -321,7 +765,12 @@
+ 
+   setitimer(ITIMER_REAL, &it, NULL);
+ 
+-  if (waitpid(child_pid, &status, 0) <= 0) FATAL("waitpid() failed");
++  if ((res = read(fsrv_st_fd, &status, 4)) != 4) {
++
++      if (stop_soon) return 0;
++      RPFATAL(res, "Unable to communicate with fork server (OOM?)");
++
++  }
+ 
+   child_pid = 0;
+   it.it_value.tv_sec = 0;
+@@ -376,7 +825,7 @@
+ 
+     }
+ 
+-  } else
++  }
+ 
+   /* Handle non-crashing inputs appropriately. */
+ 
+@@ -409,7 +858,6 @@
+ 
+ }
+ 
+-
+ /* Actually minimize! */
+ 
+ static void minimize(char** argv) {
+@@ -420,8 +868,9 @@
+   u32 orig_len = in_len, stage_o_len;
+ 
+   u32 del_len, set_len, del_pos, set_pos, i, alpha_size, cur_pass = 0;
+-  u32 syms_removed, alpha_del0 = 0, alpha_del1, alpha_del2, alpha_d_total = 0;
++  u32 syms_removed, alpha_del0 = 0, alpha_del1, alpha_del2, alpha_d_total = 0, bits_zeroed, total_bits_zeroed = 0;
+   u8  changed_any, prev_del;
++  s32 j;
+ 
+   /***********************
+    * BLOCK NORMALIZATION *
+@@ -440,18 +889,18 @@
+     u32 use_len = MIN(set_len, in_len - set_pos);
+ 
+     for (i = 0; i < use_len; i++)
+-      if (in_data[set_pos + i] != '0') break;
++      if (in_data[set_pos + i] != '\x00') break;
+ 
+     if (i != use_len) {
+ 
+       memcpy(tmp_buf, in_data, in_len);
+-      memset(tmp_buf + set_pos, '0', use_len);
++      memset(tmp_buf + set_pos, '\x00', use_len);
+   
+       res = run_target(argv, tmp_buf, in_len, 0);
+ 
+       if (res) {
+ 
+-        memset(in_data + set_pos, '0', use_len);
++        memset(in_data + set_pos, '\x00', use_len);
+         changed_any = 1;
+         alpha_del0 += use_len;
+ 
+@@ -473,6 +922,8 @@
+   ACTF(cYEL "--- " cBRI "Pass #%u " cYEL "---", ++cur_pass);
+   changed_any = 0;
+ 
++// Tobi: Could remove block deletion step if it does not work well with flat MMIO accesses
++#if 1
+   /******************
+    * BLOCK DELETION *
+    ******************/
+@@ -534,7 +985,7 @@
+ 
+   }
+ 
+-  if (del_len > 1 && in_len >= 1) {
++  if (del_len > 4 && in_len >= 1) {
+ 
+     del_len /= 2;
+     goto next_del_blksize;
+@@ -546,7 +997,8 @@
+   if (!in_len && changed_any)
+     WARNF(cLRD "Down to zero bytes - check the command line and mem limit!" cRST);
+ 
+-  if (cur_pass > 1 && !changed_any) goto finalize_all;
++  if (cur_pass > 1 && !changed_any) goto bit_minimization;
++#endif
+ 
+   /*************************
+    * ALPHABET MINIMIZATION *
+@@ -571,17 +1023,16 @@
+     u32 r;
+     u8 res;
+ 
+-    if (i == '0' || !alpha_map[i]) continue;
++    if (i == '\x00' || !alpha_map[i]) continue;
+ 
+     memcpy(tmp_buf, in_data, in_len);
+ 
+     for (r = 0; r < in_len; r++)
+-      if (tmp_buf[r] == i) tmp_buf[r] = '0'; 
++      if (tmp_buf[r] == i) tmp_buf[r] = '\x00'; 
+ 
+     res = run_target(argv, tmp_buf, in_len, 0);
+ 
+     if (res) {
+-
+       memcpy(in_data, tmp_buf, in_len);
+       syms_removed++;
+       alpha_del1 += alpha_map[i];
+@@ -601,24 +1052,45 @@
+    * CHARACTER MINIMIZATION *
+    **************************/
+ 
++  changed_any = 0;
++
+   alpha_del2 = 0;
+ 
+   ACTF(cBRI "Stage #3: " cRST "Character minimization...");
+ 
+   memcpy(tmp_buf, in_data, in_len);
+ 
++  // Tobi: Forward
+   for (i = 0; i < in_len; i++) {
++    u8 res, orig = tmp_buf[i];
++
++    if (orig == '\x00') continue;
++    tmp_buf[i] = '\x00';
+ 
++    res = run_target(argv, tmp_buf, in_len, 0);
++
++    if (res) {
++
++      in_data[i] = '\x00';
++      alpha_del2++;
++      changed_any = 1;
++
++    } else tmp_buf[i] = orig;
++
++  }
++
++  // Tobi: Backwards
++  for (i = in_len-1; i < in_len; i--) {
+     u8 res, orig = tmp_buf[i];
+ 
+-    if (orig == '0') continue;
+-    tmp_buf[i] = '0';
++    if (orig == '\x00') continue;
++    tmp_buf[i] = '\x00';
+ 
+     res = run_target(argv, tmp_buf, in_len, 0);
+ 
+     if (res) {
+ 
+-      in_data[i] = '0';
++      in_data[i] = '\x00';
+       alpha_del2++;
+       changed_any = 1;
+ 
+@@ -631,7 +1103,43 @@
+   OKF("Character minimization done, %u byte%s replaced.",
+       alpha_del2, alpha_del2 == 1 ? "" : "s");
+ 
+-  if (changed_any) goto next_pass;
++  //if (changed_any) goto next_pass;
++
++bit_minimization:
++// Tobi: Adding flipping bits to 0
++  ACTF(cBRI "Stage #4: " cRST "Bit minimization...");
++
++  memcpy(tmp_buf, in_data, in_len);
++
++  changed_any = 0;
++  bits_zeroed = 0;
++  for (i = 0; i < in_len; ++i)
++  {
++      // remove lsb's first so we remove unneccessarily large values first
++      for (j = 7; j >= 0; --j)
++      {
++        u8 res, orig = tmp_buf[i];
++
++        // search for 1 bits, skip values that only contain single bit
++        if (tmp_buf[i] & (1 << j) && tmp_buf[i] != (1 << j))
++        {
++            tmp_buf[i] ^= (1 << j);
++            res = run_target(argv, tmp_buf, in_len, 0);
++            if (res)
++            {
++                // SAYF("replacing %02x by %02x\n", orig, tmp_buf[i]);
++                in_data[i] = tmp_buf[i];
++                bits_zeroed++;
++                changed_any = 1;
++            }
++            else
++                tmp_buf[i] = orig;
++        }
++      }
++  }
++  total_bits_zeroed += bits_zeroed;
++  OKF("Bit minimization done, %u bit%s replaced.",
++  bits_zeroed, bits_zeroed == 1 ? "" : "s");
+ 
+ finalize_all:
+ 
+@@ -639,11 +1147,12 @@
+        cGRA "     File size reduced by : " cRST "%0.02f%% (to %u byte%s)\n"
+        cGRA "    Characters simplified : " cRST "%0.02f%%\n"
+        cGRA "     Number of execs done : " cRST "%u\n"
+-       cGRA "          Fruitless execs : " cRST "path=%u crash=%u hang=%s%u\n\n",
++       cGRA "          Fruitless execs : " cRST "path=%u crash=%u hang=%s%u\n"
++       cGRA "              Bits zeroed : " cRST "%u\n\n",
+        100 - ((double)in_len) * 100 / orig_len, in_len, in_len == 1 ? "" : "s",
+        ((double)(alpha_d_total)) * 100 / (in_len ? in_len : 1),
+        total_execs, missed_paths, missed_crashes, missed_hangs ? cLRD : "",
+-       missed_hangs);
++       missed_hangs, total_bits_zeroed);
+ 
+   if (total_execs > 50 && missed_hangs * 10 > total_execs)
+     WARNF(cLRD "Frequent timeouts - results may be skewed." cRST);
+@@ -687,6 +1196,12 @@
+ 
+   }
+ 
++  unlink(prog_in);
++
++  prog_in_fd = open(prog_in, O_RDWR | O_CREAT | O_EXCL, 0600);
++
++  if (prog_in_fd < 0) PFATAL("Unable to create '%s'", prog_in);
++
+   /* Set sane defaults... */
+ 
+   x = getenv("ASAN_OPTIONS");
+@@ -818,7 +1333,9 @@
+        "  -f file       - input file read by the tested program (stdin)\n"
+        "  -t msec       - timeout for each run (%u ms)\n"
+        "  -m megs       - memory limit for child process (%u MB)\n"
+-       "  -Q            - use binary-only instrumentation (QEMU mode)\n\n"
++       "  -Q            - use binary-only instrumentation (QEMU mode)\n"
++       "  -U            - use Unicorn-based instrumentation (Unicorn mode)\n\n"
++       "                  (Not necessary, here for consistency with other afl-* tools)\n\n"
+ 
+        "Minimization settings:\n\n"
+ 
+@@ -949,7 +1466,6 @@
+ 
+ }
+ 
+-
+ /* Read mask bitmap from file. This is for the -B option. */
+ 
+ static void read_bitmap(u8* fname) {
+@@ -964,21 +1480,19 @@
+ 
+ }
+ 
+-
+-
+ /* Main entry point */
+ 
+ int main(int argc, char** argv) {
+ 
+   s32 opt;
+-  u8  mem_limit_given = 0, timeout_given = 0, qemu_mode = 0;
++  u8  mem_limit_given = 0, timeout_given = 0, qemu_mode = 0, unicorn_mode = 0;
+   char** use_argv;
+ 
+   doc_path = access(DOC_PATH, F_OK) ? "docs" : DOC_PATH;
+ 
+   SAYF(cCYA "afl-tmin " cBRI VERSION cRST " by <lcamtuf@google.com>\n");
+ 
+-  while ((opt = getopt(argc,argv,"+i:o:f:m:t:B:xeQ")) > 0)
++  while ((opt = getopt(argc,argv,"+i:o:f:m:t:B:xeQU")) > 0)
+ 
+     switch (opt) {
+ 
+@@ -1070,6 +1584,14 @@
+         qemu_mode = 1;
+         break;
+ 
++      case 'U':
++
++        if (unicorn_mode) FATAL("Multiple -Q options not supported");
++        if (!mem_limit_given) mem_limit = MEM_LIMIT_UNICORN;
++
++        unicorn_mode = 1;
++        break;
++
+       case 'B': /* load bitmap */
+ 
+         /* This is a secret undocumented option! It is speculated to be useful
+@@ -1117,6 +1639,8 @@
+ 
+   read_initial_file();
+ 
++  init_forkserver(use_argv);
++
+   ACTF("Performing dry run (mem limit = %llu MB, timeout = %u ms%s)...",
+        mem_limit, exec_tmout, edges_only ? ", edges only" : "");
+ 
+diff -urN afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/afl-whatsdown afl/afl-whatsdown
+--- afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/afl-whatsdown	1970-01-01 01:00:00.000000000 +0100
++++ afl/afl-whatsdown	2022-01-13 02:40:51.926359942 +0100
+@@ -0,0 +1,164 @@
++#!/bin/sh
++#
++# american fuzzy lop - status check tool
++# --------------------------------------
++#
++# Written and maintained by Michal Zalewski <lcamtuf@google.com>
++#
++# Copyright 2015 Google Inc. All rights reserved.
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at:
++#
++#   http://www.apache.org/licenses/LICENSE-2.0
++#
++# This tool summarizes the status of any locally-running synchronized
++# instances of afl-fuzz.
++#
++
++echo "status check tool for afl-fuzz by <lcamtuf@google.com>"
++echo
++
++if [ "$1" = "-s" ]; then
++
++  SUMMARY_ONLY=1
++  DIR="$2"
++
++else
++
++  unset SUMMARY_ONLY
++  DIR="$1"
++
++fi
++
++if [ "$DIR" = "" ]; then
++
++  echo "Usage: $0 [ -s ] afl_sync_dir" 1>&2
++  echo 1>&2
++  echo "The -s option causes the tool to skip all the per-fuzzer trivia and show" 1>&2
++  echo "just the summary results. See docs/parallel_fuzzing.txt for additional tips." 1>&2
++  echo 1>&2
++  exit 1
++
++fi
++
++cd "$DIR" || exit 1
++
++if [ -d queue ]; then
++
++  echo "[-] Error: parameter is an individual output directory, not a sync dir." 1>&2
++  exit 1
++
++fi
++
++CUR_TIME=`date +%s`
++
++TMP=`mktemp -t .afl-whatsup-XXXXXXXX` || exit 1
++
++ALIVE_CNT=0
++DEAD_CNT=0
++
++TOTAL_TIME=0
++TOTAL_EXECS=0
++TOTAL_EPS=0
++TOTAL_CRASHES=0
++TOTAL_PFAV=0
++TOTAL_PENDING=0
++TOTAL_PATHS_FOUND=0
++
++if [ "$SUMMARY_ONLY" = "" ]; then
++
++  echo "Individual fuzzers"
++  echo "=================="
++  echo
++
++fi
++
++for i in `find . -maxdepth 2 -iname fuzzer_stats | sort`; do
++
++  sed 's/^command_line.*$/_skip:1/;s/[ ]*:[ ]*/="/;s/$/"/' "$i" >"$TMP"
++  . "$TMP"
++
++  RUN_UNIX=$((CUR_TIME - start_time))
++  RUN_DAYS=$((RUN_UNIX / 60 / 60 / 24))
++  RUN_HRS=$(((RUN_UNIX / 60 / 60) % 24))
++
++  if [ "$SUMMARY_ONLY" = "" ]; then
++
++    echo ">>> $afl_banner ($RUN_DAYS days, $RUN_HRS hrs) <<<"
++    echo
++
++  fi
++
++  #if ! kill -0 "$fuzzer_pid" 2>/dev/null; then
++
++    #if [ "$SUMMARY_ONLY" = "" ]; then
++
++     # echo "  Instance is dead or running remotely, skipping."
++      #echo
++
++    #fi
++
++    #DEAD_CNT=$((DEAD_CNT + 1))
++    #continue
++
++  #fi
++
++  ALIVE_CNT=$((ALIVE_CNT + 1))
++  TOTAL_PATHS_FOUND=$((TOTAL_PATHS_FOUND + paths_found))
++  EXEC_SEC=$((execs_done / RUN_UNIX))
++  PATH_PERC=$((cur_path * 100 / paths_total))
++
++  TOTAL_TIME=$((TOTAL_TIME + RUN_UNIX))
++  TOTAL_EPS=$((TOTAL_EPS + EXEC_SEC))
++  TOTAL_EXECS=$((TOTAL_EXECS + execs_done))
++  TOTAL_CRASHES=$((TOTAL_CRASHES + unique_crashes))
++  TOTAL_PENDING=$((TOTAL_PENDING + pending_total))
++  TOTAL_PFAV=$((TOTAL_PFAV + pending_favs))
++
++  if [ "$SUMMARY_ONLY" = "" ]; then
++
++    echo "  cycle $((cycles_done + 1)), lifetime speed $EXEC_SEC execs/sec, path $cur_path/$paths_total (${PATH_PERC}%)"
++
++    if [ "$unique_crashes" = "0" ]; then
++      echo "  pending $pending_favs/$pending_total, coverage $bitmap_cvg, no crashes yet"
++    else
++      echo "  pending $pending_favs/$pending_total, coverage $bitmap_cvg, crash count $unique_crashes (!)"
++    fi
++
++    echo
++
++  fi
++
++done
++
++rm -f "$TMP"
++
++TOTAL_DAYS=$((TOTAL_TIME / 60 / 60 / 24))
++TOTAL_HRS=$(((TOTAL_TIME / 60 / 60) % 24))
++
++test "$TOTAL_TIME" = "0" && TOTAL_TIME=1
++
++echo "Summary stats"
++echo "============="
++echo
++echo "       Fuzzers alive : $ALIVE_CNT"
++
++if [ ! "$DEAD_CNT" = "0" ]; then
++  echo "      Dead or remote : $DEAD_CNT (excluded from stats)"
++fi
++
++echo "      Total run time : $TOTAL_DAYS days, $TOTAL_HRS hours"
++echo "         Total execs : $TOTAL_EXECS"
++echo "    Cumulative speed : $TOTAL_EPS execs/sec"
++echo "       Pending paths : $TOTAL_PFAV faves, $TOTAL_PENDING total"
++echo "    Total Paths : $TOTAL_PATHS_FOUND"
++if [ "$ALIVE_CNT" -gt "1" ]; then
++  echo "  Pending per fuzzer : $((TOTAL_PFAV/ALIVE_CNT)) faves, $((TOTAL_PENDING/ALIVE_CNT)) total (on average)"
++fi
++
++echo "       Crashes found : $TOTAL_CRASHES locally unique"
++echo
++
++exit 0
+diff -urN afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/afl-whatsup afl/afl-whatsup
+--- afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/afl-whatsup	2020-01-07 20:20:26.000000000 +0100
++++ afl/afl-whatsup	2022-01-13 02:40:51.926359942 +0100
+@@ -149,7 +149,7 @@
+ fi
+ 
+ echo "      Total run time : $TOTAL_DAYS days, $TOTAL_HRS hours"
+-echo "         Total execs : $((TOTAL_EXECS / 1000 / 1000)) million"
++echo "         Total execs : $TOTAL_EXECS"
+ echo "    Cumulative speed : $TOTAL_EPS execs/sec"
+ echo "       Pending paths : $TOTAL_PFAV faves, $TOTAL_PENDING total"
+ 
+diff -urN afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/config.h afl/config.h
+--- afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/config.h	2020-01-07 20:20:26.000000000 +0100
++++ afl/config.h	2022-01-13 02:40:51.926359942 +0100
+@@ -59,6 +59,10 @@
+ 
+ #define MEM_LIMIT_QEMU      200
+ 
++/* Default memory limit when running in Unicorn mode (MB): */
++
++#define MEM_LIMIT_UNICORN   200
++
+ /* Number of calibration cycles per every new test case (and for test
+    cases that show variable behavior): */
+ 
+diff -urN afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/experimental/clang_asm_normalize/as afl/experimental/clang_asm_normalize/as
+--- afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/experimental/clang_asm_normalize/as	2020-01-07 20:20:26.000000000 +0100
++++ afl/experimental/clang_asm_normalize/as	1970-01-01 01:00:00.000000000 +0100
+@@ -1,75 +0,0 @@
+-#!/bin/sh
+-#
+-# american fuzzy lop - clang assembly normalizer
+-# ----------------------------------------------
+-#
+-# Written and maintained by Michal Zalewski <lcamtuf@google.com>
+-# The idea for this wrapper comes from Ryan Govostes.
+-#
+-# Copyright 2013, 2014 Google Inc. All rights reserved.
+-#
+-# Licensed under the Apache License, Version 2.0 (the "License");
+-# you may not use this file except in compliance with the License.
+-# You may obtain a copy of the License at:
+-#
+-#   http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# This 'as' wrapper should allow you to instrument unruly, hand-written
+-# assembly with afl-as.
+-#
+-# Usage:
+-#
+-# export AFL_REAL_PATH=/path/to/directory/with/afl-as/
+-# AFL_PATH=/path/to/this/directory/ make clean all
+-
+-if [ "$#" -lt "2" ]; then
+-  echo "[-] Error: this utility can't be called directly." 1>&2
+-  exit 1
+-fi
+-
+-if [ "$AFL_REAL_PATH" = "" ]; then
+-  echo "[-] Error: AFL_REAL_PATH not set!" 1>&2
+-  exit 1
+-fi
+-
+-if [ ! -x "$AFL_REAL_PATH/afl-as" ]; then
+-  echo "[-] Error: AFL_REAL_PATH does not contain the 'afl-as' binary." 1>&2
+-  exit 1
+-fi
+-
+-unset __AFL_AS_CMDLINE __AFL_FNAME
+-
+-while [ ! "$#" = "0" ]; do
+-
+-  if [ "$#" = "1" ]; then
+-    __AFL_FNAME="$1"
+-  else
+-    __AFL_AS_CMDLINE="${__AFL_AS_CMDLINE} $1"
+-  fi
+-
+-  shift
+-
+-done
+-
+-test "$TMPDIR" = "" && TMPDIR=/tmp
+-
+-TMPFILE=`mktemp $TMPDIR/.afl-XXXXXXXXXX.s`
+-
+-test "$TMPFILE" = "" && exit 1
+-
+-clang -cc1as -filetype asm -output-asm-variant 0 "${__AFL_FNAME}" >"$TMPFILE"
+-
+-ERR="$?"
+-
+-if [ ! "$ERR" = "0" ]; then
+-  rm -f "$TMPFILE"
+-  exit $ERR
+-fi
+-
+-"$AFL_REAL_PATH/afl-as" ${__AFL_AS_CMDLINE} "$TMPFILE"
+-
+-ERR="$?"
+-
+-rm -f "$TMPFILE"
+-
+-exit "$ERR"
+diff -urN afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/LICENSE afl/LICENSE
+--- afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/LICENSE	1970-01-01 01:00:00.000000000 +0100
++++ afl/LICENSE	2022-01-13 02:40:51.926359942 +0100
+@@ -0,0 +1,201 @@
++   Apache License
++                           Version 2.0, January 2004
++                        http://www.apache.org/licenses/
++
++   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
++
++   1. Definitions.
++
++      "License" shall mean the terms and conditions for use, reproduction,
++      and distribution as defined by Sections 1 through 9 of this document.
++
++      "Licensor" shall mean the copyright owner or entity authorized by
++      the copyright owner that is granting the License.
++
++      "Legal Entity" shall mean the union of the acting entity and all
++      other entities that control, are controlled by, or are under common
++      control with that entity. For the purposes of this definition,
++      "control" means (i) the power, direct or indirect, to cause the
++      direction or management of such entity, whether by contract or
++      otherwise, or (ii) ownership of fifty percent (50%) or more of the
++      outstanding shares, or (iii) beneficial ownership of such entity.
++
++      "You" (or "Your") shall mean an individual or Legal Entity
++      exercising permissions granted by this License.
++
++      "Source" form shall mean the preferred form for making modifications,
++      including but not limited to software source code, documentation
++      source, and configuration files.
++
++      "Object" form shall mean any form resulting from mechanical
++      transformation or translation of a Source form, including but
++      not limited to compiled object code, generated documentation,
++      and conversions to other media types.
++
++      "Work" shall mean the work of authorship, whether in Source or
++      Object form, made available under the License, as indicated by a
++      copyright notice that is included in or attached to the work
++      (an example is provided in the Appendix below).
++
++      "Derivative Works" shall mean any work, whether in Source or Object
++      form, that is based on (or derived from) the Work and for which the
++      editorial revisions, annotations, elaborations, or other modifications
++      represent, as a whole, an original work of authorship. For the purposes
++      of this License, Derivative Works shall not include works that remain
++      separable from, or merely link (or bind by name) to the interfaces of,
++      the Work and Derivative Works thereof.
++
++      "Contribution" shall mean any work of authorship, including
++      the original version of the Work and any modifications or additions
++      to that Work or Derivative Works thereof, that is intentionally
++      submitted to Licensor for inclusion in the Work by the copyright owner
++      or by an individual or Legal Entity authorized to submit on behalf of
++      the copyright owner. For the purposes of this definition, "submitted"
++      means any form of electronic, verbal, or written communication sent
++      to the Licensor or its representatives, including but not limited to
++      communication on electronic mailing lists, source code control systems,
++      and issue tracking systems that are managed by, or on behalf of, the
++      Licensor for the purpose of discussing and improving the Work, but
++      excluding communication that is conspicuously marked or otherwise
++      designated in writing by the copyright owner as "Not a Contribution."
++
++      "Contributor" shall mean Licensor and any individual or Legal Entity
++      on behalf of whom a Contribution has been received by Licensor and
++      subsequently incorporated within the Work.
++
++   2. Grant of Copyright License. Subject to the terms and conditions of
++      this License, each Contributor hereby grants to You a perpetual,
++      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++      copyright license to reproduce, prepare Derivative Works of,
++      publicly display, publicly perform, sublicense, and distribute the
++      Work and such Derivative Works in Source or Object form.
++
++   3. Grant of Patent License. Subject to the terms and conditions of
++      this License, each Contributor hereby grants to You a perpetual,
++      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++      (except as stated in this section) patent license to make, have made,
++      use, offer to sell, sell, import, and otherwise transfer the Work,
++      where such license applies only to those patent claims licensable
++      by such Contributor that are necessarily infringed by their
++      Contribution(s) alone or by combination of their Contribution(s)
++      with the Work to which such Contribution(s) was submitted. If You
++      institute patent litigation against any entity (including a
++      cross-claim or counterclaim in a lawsuit) alleging that the Work
++      or a Contribution incorporated within the Work constitutes direct
++      or contributory patent infringement, then any patent licenses
++      granted to You under this License for that Work shall terminate
++      as of the date such litigation is filed.
++
++   4. Redistribution. You may reproduce and distribute copies of the
++      Work or Derivative Works thereof in any medium, with or without
++      modifications, and in Source or Object form, provided that You
++      meet the following conditions:
++
++      (a) You must give any other recipients of the Work or
++          Derivative Works a copy of this License; and
++
++      (b) You must cause any modified files to carry prominent notices
++          stating that You changed the files; and
++
++      (c) You must retain, in the Source form of any Derivative Works
++          that You distribute, all copyright, patent, trademark, and
++          attribution notices from the Source form of the Work,
++          excluding those notices that do not pertain to any part of
++          the Derivative Works; and
++
++      (d) If the Work includes a "NOTICE" text file as part of its
++          distribution, then any Derivative Works that You distribute must
++          include a readable copy of the attribution notices contained
++          within such NOTICE file, excluding those notices that do not
++          pertain to any part of the Derivative Works, in at least one
++          of the following places: within a NOTICE text file distributed
++          as part of the Derivative Works; within the Source form or
++          documentation, if provided along with the Derivative Works; or,
++          within a display generated by the Derivative Works, if and
++          wherever such third-party notices normally appear. The contents
++          of the NOTICE file are for informational purposes only and
++          do not modify the License. You may add Your own attribution
++          notices within Derivative Works that You distribute, alongside
++          or as an addendum to the NOTICE text from the Work, provided
++          that such additional attribution notices cannot be construed
++          as modifying the License.
++
++      You may add Your own copyright statement to Your modifications and
++      may provide additional or different license terms and conditions
++      for use, reproduction, or distribution of Your modifications, or
++      for any such Derivative Works as a whole, provided Your use,
++      reproduction, and distribution of the Work otherwise complies with
++      the conditions stated in this License.
++
++   5. Submission of Contributions. Unless You explicitly state otherwise,
++      any Contribution intentionally submitted for inclusion in the Work
++      by You to the Licensor shall be under the terms and conditions of
++      this License, without any additional terms or conditions.
++      Notwithstanding the above, nothing herein shall supersede or modify
++      the terms of any separate license agreement you may have executed
++      with Licensor regarding such Contributions.
++
++   6. Trademarks. This License does not grant permission to use the trade
++      names, trademarks, service marks, or product names of the Licensor,
++      except as required for reasonable and customary use in describing the
++      origin of the Work and reproducing the content of the NOTICE file.
++
++   7. Disclaimer of Warranty. Unless required by applicable law or
++      agreed to in writing, Licensor provides the Work (and each
++      Contributor provides its Contributions) on an "AS IS" BASIS,
++      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
++      implied, including, without limitation, any warranties or conditions
++      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
++      PARTICULAR PURPOSE. You are solely responsible for determining the
++      appropriateness of using or redistributing the Work and assume any
++      risks associated with Your exercise of permissions under this License.
++
++   8. Limitation of Liability. In no event and under no legal theory,
++      whether in tort (including negligence), contract, or otherwise,
++      unless required by applicable law (such as deliberate and grossly
++      negligent acts) or agreed to in writing, shall any Contributor be
++      liable to You for damages, including any direct, indirect, special,
++      incidental, or consequential damages of any character arising as a
++      result of this License or out of the use or inability to use the
++      Work (including but not limited to damages for loss of goodwill,
++      work stoppage, computer failure or malfunction, or any and all
++      other commercial damages or losses), even if such Contributor
++      has been advised of the possibility of such damages.
++
++   9. Accepting Warranty or Additional Liability. While redistributing
++      the Work or Derivative Works thereof, You may choose to offer,
++      and charge a fee for, acceptance of support, warranty, indemnity,
++      or other liability obligations and/or rights consistent with this
++      License. However, in accepting such obligations, You may act only
++      on Your own behalf and on Your sole responsibility, not on behalf
++      of any other Contributor, and only if You agree to indemnify,
++      defend, and hold each Contributor harmless for any liability
++      incurred by, or claims asserted against, such Contributor by reason
++      of your accepting any such warranty or additional liability.
++
++   END OF TERMS AND CONDITIONS
++
++   APPENDIX: How to apply the Apache License to your work.
++
++      To apply the Apache License to your work, attach the following
++      boilerplate notice, with the fields enclosed by brackets "[]"
++      replaced with your own identifying information. (Don't include
++      the brackets!)  The text should be enclosed in the appropriate
++      comment syntax for the file format. We also recommend that a
++      file or class name and description of purpose be included on the
++      same "printed page" as the copyright notice for easier
++      identification within third-party archives.
++
++   Copyright [yyyy] [name of copyright owner]
++
++   Licensed under the Apache License, Version 2.0 (the "License");
++   you may not use this file except in compliance with the License.
++   You may obtain a copy of the License at
++
++       http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing, software
++   distributed under the License is distributed on an "AS IS" BASIS,
++   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++   See the License for the specific language governing permissions and
++   limitations under the License.
+\ No newline at end of file
+diff -urN afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/Makefile afl/Makefile
+--- afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/Makefile	2020-01-07 20:20:26.000000000 +0100
++++ afl/Makefile	2022-01-13 02:40:51.926359942 +0100
+@@ -89,10 +89,29 @@
+ test_build: afl-gcc afl-as afl-showmap
+ 	@echo "[*] Testing the CC wrapper and instrumentation output..."
+ 	unset AFL_USE_ASAN AFL_USE_MSAN; AFL_QUIET=1 AFL_INST_RATIO=100 AFL_PATH=. ./$(TEST_CC) $(CFLAGS) test-instr.c -o test-instr $(LDFLAGS)
++	unset AFL_USE_ASAN AFL_USE_MSAN; AFL_QUIET=1 AFL_INST_RATIO=100 AFL_PATH=. ./$(TEST_CC) $(CFLAGS) test-instr-argv.c -o test-instr-argv $(LDFLAGS)
+ 	echo 0 | ./afl-showmap -m none -q -o .test-instr0 ./test-instr
+ 	echo 1 | ./afl-showmap -m none -q -o .test-instr1 ./test-instr
+-	@rm -f test-instr
+ 	@cmp -s .test-instr0 .test-instr1; DR="$$?"; rm -f .test-instr0 .test-instr1; if [ "$$DR" = "0" ]; then echo; echo "Oops, the instrumentation does not seem to be behaving correctly!"; echo; echo "Please ping <lcamtuf@google.com> to troubleshoot the issue."; echo; exit 1; fi
++	@mkdir -p .tmp_inputs .tmp_outputs
++
++	@echo 0 > .tmp_inputs/input0
++	@echo 1 > .tmp_inputs/input1
++	./afl-showmap -m none -q -i .tmp_inputs/input0 -o .test-instr0 ./test-instr 
++	./afl-showmap -m none -q -i .tmp_inputs/input1 -o .test-instr1 ./test-instr
++	@cmp -s .test-instr0 .test-instr1; DR="$$?"; rm -f .test-instr0 .test-instr1; if [ "$$DR" = "0" ]; then echo; echo "Oops, the instrumentation does not seem to be behaving correctly!"; echo; echo "Please ping <lcamtuf@google.com> to troubleshoot the issue."; echo; exit 1; fi
++
++	./afl-showmap -m none -q -i .tmp_inputs/input0 -o .test-instr0 ./test-instr-argv @@ 
++	./afl-showmap -m none -q -i .tmp_inputs/input1 -o .test-instr1 ./test-instr-argv @@
++	@cmp -s .test-instr0 .test-instr1; DR="$$?"; rm -f .test-instr0 .test-instr1; if [ "$$DR" = "0" ]; then echo; echo "Oops, the instrumentation does not seem to be behaving correctly!"; echo; echo "Please ping <lcamtuf@google.com> to troubleshoot the issue."; echo; exit 1; fi
++
++	./afl-showmap -m none -q -i .tmp_inputs -o .tmp_outputs ./test-instr
++	@cmp -s .tmp_outputs/.test-instr0 .tmp_outputs/.test-instr1; DR="$$?"; rm -f tmp_outputs/.test-instr0 tmp_outputs/.test-instr1; if [ "$$DR" = "0" ]; then echo; echo "Oops, the instrumentation does not seem to be behaving correctly!"; echo; echo "Please ping <lcamtuf@google.com> to troubleshoot the issue."; echo; exit 1; fi
++
++	./afl-showmap -m none -q -i .tmp_inputs -o .tmp_outputs ./test-instr-argv @@
++	@cmp -s .tmp_outputs/.test-instr0 .tmp_outputs/.test-instr1; DR="$$?"; rm -f tmp_outputs/.test-instr0 tmp_outputs/.test-instr1; if [ "$$DR" = "0" ]; then echo; echo "Oops, the instrumentation does not seem to be behaving correctly!"; echo; echo "Please ping <lcamtuf@google.com> to troubleshoot the issue."; echo; exit 1; fi
++
++	@rm -rf .tmp_outputs .tmp_inputs
+ 	@echo "[+] All right, the instrumentation seems to be working!"
+ 
+ else
+@@ -111,8 +130,8 @@
+ .NOTPARALLEL: clean
+ 
+ clean:
+-	rm -f $(PROGS) afl-as as afl-g++ afl-clang afl-clang++ *.o *~ a.out core core.[1-9][0-9]* *.stackdump test .test test-instr .test-instr0 .test-instr1 qemu_mode/qemu-2.10.0.tar.bz2 afl-qemu-trace
+-	rm -rf out_dir qemu_mode/qemu-2.10.0
++	rm -f $(PROGS) afl-as as afl-g++ afl-clang afl-clang++ *.o *~ a.out core core.[1-9][0-9]* *.stackdump test .test test-instr test-instr-argv .test-instr0 .test-instr1 qemu_mode/qemu-2.10.0.tar.bz2 afl-qemu-trace
++	rm -rf out_dir qemu_mode/qemu-2.10.0 .tmp_outputs .tmp_inputs
+ 	$(MAKE) -C llvm_mode clean
+ 	$(MAKE) -C libdislocator clean
+ 	$(MAKE) -C libtokencap clean
+@@ -123,6 +142,7 @@
+ 	install -m 755 $(PROGS) $(SH_PROGS) $${DESTDIR}$(BIN_PATH)
+ 	rm -f $${DESTDIR}$(BIN_PATH)/afl-as
+ 	if [ -f afl-qemu-trace ]; then install -m 755 afl-qemu-trace $${DESTDIR}$(BIN_PATH); fi
++	if [ -f libunicorn.so.1 ]; then install -m 755 libunicorn.so.1 $${DESTDIR}$(HELPER_PATH); ln -sf libunicorn.so.1 $${DESTDIR}$(HELPER_PATH)/libunicorn.so; fi
+ ifndef AFL_TRACE_PC
+ 	if [ -f afl-clang-fast -a -f afl-llvm-pass.so -a -f afl-llvm-rt.o ]; then set -e; install -m 755 afl-clang-fast $${DESTDIR}$(BIN_PATH); ln -sf afl-clang-fast $${DESTDIR}$(BIN_PATH)/afl-clang-fast++; install -m 755 afl-llvm-pass.so afl-llvm-rt.o $${DESTDIR}$(HELPER_PATH); fi
+ else
+diff -urN afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/qemu_mode/build_qemu_support.sh afl/qemu_mode/build_qemu_support.sh
+--- afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/qemu_mode/build_qemu_support.sh	2020-01-07 20:20:26.000000000 +0100
++++ afl/qemu_mode/build_qemu_support.sh	2022-01-13 02:40:51.929693275 +0100
+@@ -139,7 +139,7 @@
+ 
+ CFLAGS="-O3 -ggdb" ./configure --disable-system \
+   --enable-linux-user --disable-gtk --disable-sdl --disable-vnc \
+-  --target-list="${CPU_TARGET}-linux-user" --enable-pie --enable-kvm || exit 1
++  --target-list="${CPU_TARGET}-linux-user" --enable-pie --enable-kvm --python=/usr/bin/python2 || exit 1
+ 
+ echo "[+] Configuration complete."
+ 
+diff -urN afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/README-aflunicorn.md afl/README-aflunicorn.md
+--- afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/README-aflunicorn.md	1970-01-01 01:00:00.000000000 +0100
++++ afl/README-aflunicorn.md	2022-01-13 02:40:51.926359942 +0100
+@@ -0,0 +1,16 @@
++```
++        __ _                 _                      
++  __ _ / _| |    _   _ _ __ (_) ___ ___  _ __ _ __  
++ / _` | |_| |___| | | | '_ \| |/ __/ _ \| '__| '_ \ 
++| (_| |  _| |___| |_| | | | | | (_| (_) | |  | | | |
++ \__,_|_| |_|    \__,_|_| |_|_|\___\___/|_|  |_| |_|
++                                                      
++```
++
++afl-unicorn lets you fuzz any piece of binary that can be emulated by [Unicorn Engine](http://www.unicorn-engine.org/). 
++
++For an in-depth description of what this is, how to install it, and how to use it check out this [blog post](https://medium.com/@njvoss299/afl-unicorn-fuzzing-arbitrary-binary-code-563ca28936bf).
++
++For general help with AFL, please refer to both the official [AFL website](http://lcamtuf.coredump.cx/afl/) and the documents in the /doc/ directory.
++
++Created by Nathan Voss, originally funded by [Battelle](https://www.battelle.org/cyber).
+\ No newline at end of file
+diff -urN afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/test-instr-argv.c afl/test-instr-argv.c
+--- afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/test-instr-argv.c	1970-01-01 01:00:00.000000000 +0100
++++ afl/test-instr-argv.c	2022-01-13 02:40:51.929693275 +0100
+@@ -0,0 +1,45 @@
++/*
++   american fuzzy lop - a trivial program to test the build
++   --------------------------------------------------------
++
++   Written and maintained by Michal Zalewski <lcamtuf@google.com>
++
++   Copyright 2014 Google Inc. All rights reserved.
++
++   Licensed under the Apache License, Version 2.0 (the "License");
++   you may not use this file except in compliance with the License.
++   You may obtain a copy of the License at:
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <fcntl.h>
++
++int main(int argc, char** argv) {
++
++  char buf[8];
++  int fd = 0;
++
++  if(argc != 2)
++      return -1;
++
++  fd = open(argv[1], O_RDONLY);
++
++  if (read(fd, buf, 8) < 1) {
++    printf("Hum?\n");
++    exit(1);
++  }
++
++  close(fd);
++
++  if (buf[0] == '0')
++    printf("Looks like a zero to me!\n");
++  else
++    printf("A non-zero value? How quaint!\n");
++
++  exit(0);
++}
+diff -urN afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/types.h afl/types.h
+--- afl-2.52b-c49750c9e27e29100d055292453551d560e594ce/types.h	2020-01-07 20:20:26.000000000 +0100
++++ afl/types.h	2022-01-13 02:40:51.929693275 +0100
+@@ -80,7 +80,9 @@
+ #define MEM_BARRIER() \
+   asm volatile("" ::: "memory")
+ 
++#ifndef likely
+ #define likely(_x)   __builtin_expect(!!(_x), 1)
+ #define unlikely(_x)  __builtin_expect(!!(_x), 0)
++#endif
+ 
+ #endif /* ! _HAVE_TYPES_H */

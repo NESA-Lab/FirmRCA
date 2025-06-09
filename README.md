@@ -1,6 +1,9 @@
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.15623400.svg)](https://doi.org/10.5281/zenodo.15623400) [![DOI](https://img.shields.io/github/license/NESA-Lab/FirmRCA.svg)](https://img.shields.io/github/license/NESA-Lab/FirmRCA.svg)
+
+
 # NOTE
 
-**Due to some personal matters that require my attention, I will update this repository after June 1, 2025, with more information on emulation and dataset.**
+During the development of FirmRCA, footprint collection and root cause analysis were carried out sequentially on two separate servers. However, the server responsible for footprint collection suffered a hard drive failure. As a result, the version of fuzzware used by the current repository’s fuzzware-emulator is uncertain, which may introduce potential instability in the experimental results.
 
 # FirmRCA
 
@@ -90,6 +93,24 @@ make
 
 ## Dataset 
 
-Currently, we prepare 3 testsuites as a demo. You can unzip testsuites-demo.zip as a `testsuites` directory.
+Currently, we prepare 3 testsuites as a demo. You can download full dataset from [10.5281/zenodo.15623399](https://doi.org/10.5281/zenodo.15623399). 
 
-We will further release all testsuites.
+If you want to generate more testcases, you can prepare your files like this:
+
+```
+.
+├── testsuites
+│   ├── <something-your-bin-name1>
+│   │   ├── firmware.bin
+│   ├── <something-your-bin-name2>
+│   │   ├── firmware.bin
+│   ├── <something-your-bin-name3>
+│   │   ├── firmware.bin
+
+```
+
+`<something-your-bin-name1>` should be a key in `config.yml`. You should also specify `bin_load_addr` that loads the binary.
+
+Then please refer to [fuzzware-fuzzer](https://github.com/fuzzware-fuzzer/fuzzware-emulator) to setup the environment. Please do not clone the their repository in that the unicorn version may be different. Use the fuzzware-emulator in this repository, instead.
+
+Then, run `python dataset.py` to generate your own dataset.

@@ -1,0 +1,28 @@
+tests/*/output
+
+# IDEs
+.idea
+.vscode
+
+# FS relics
+.fuse_hidden*
+
+# Binary Files
+*.pyc
+*.egg-info
+__pycache__
+
+*.so
+*.o
+
+# AFL Installs
+afl
+AFLplusplus
+
+# ida stuff
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+*.idb

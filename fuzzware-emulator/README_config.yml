@@ -1,0 +1,364 @@
+############################
+#         OVERVIEW         #
+############################
+# Required configurations:
+# - Basic memory map and binary firmware image
+
+# Optional configurations:
+# - exit points: Early conclusion of emulation process (error cases, shutdown cases)
+# - interrupts: Making the emulator pend interrupts (periodically or in code locations)
+# - skipped functions: Making functions return immediately to avoid unnecessary MMIO
+# - MMIO models: Optimize fuzzing input to be more meaningful to firmware logic
+# - boot guidance: Guide the fuzzer along a successful boot and make it reach a successfully booted state
+# - timers: Perform custom logic periodically during emulation
+# - custom handlers: Python hooks performing custom logic (logging, detection, function replacement, ...)
+
+############################
+#   CONFIGURATION RE-USE   #
+############################
+# If we want to re-use configuration snippets across multiple configs, we can include them like this:
+include:
+  # Cortex-M specific memory ranges
+  - ./configs/hw/cortexm_memory.yml
+  # A symbol list dumped from an ELF file
+  - ./syms.yml
+
+############################
+# MANDATORY CONFIGURATIONS #
+############################
+# We need a basic memory layout for the firmware to work
+# The names of the memory regions can be chosen arbitrarily (rom, ram are an easy to understand default)
+# The 'mmio_' prefix in a memory region name causes MMIO register fuzzing to occur
+# NOTE: make sure that these addresses do not overlap (exception: overlay regions)
+memory_map:
+  rom: {
+    # (required)
+    # Minimum required data of a region: where? how large?
+    base_addr: 0x0, size: 0x40000,
+    # (optional)
+    # Permissions: defaults to rwx
+    permissions: r-x,
+    # (optional)
+    # We need at least one region which contains the code to be executed ('file' attribute)
+    # For more generic / reusable configurations, we can use wildcards (as long as a file can be uniquely identified)
+    # Prepending the filename with './' (e.g., './*.bin') will make the lookup local to the current config file, even if it is included
+    file: '*.bin',
+    # (optional) For automatic entry point and stack pointer retrieval, we can specify one region
+    # which is backed by a file as the main code region (optional).
+    # If only one region is backed by a file, is_entry is auto-detected.
+    is_entry: True,
+    # (optional)
+    # In case the binary blob contains some prepended data or a bootloader to be ignored, an
+    # offset into the blob can be specified to fetch entry state information from (optional).
+    ivt_offset: 0x2000,
+    # (optional)
+    # If a part of the file should be skipped, use 'file_offset'
+    file_offset: 0x2000,
+    # If the file contents should be written to an offset into the memory region, use 'load_offset'
+    load_offset: 0x2000
+  }
+  # A region which is not backed by a file, defaults to all zeroes
+  ram:  { base_addr: 0x20000000, size: 0x00400000, permissions: rw-}
+  
+  # Optional memory map features:
+  # 1. We can prefix a region's name with 'mmio_' to have fuzzware treat it as (a custom) MMIO region and supply fuzzed input
+  mmio_my_custom_region: {base_addr: 0x00800000, permissions: r--, size: 0x7000}
+  # 2. For more advanced manual configuration, we can create an overlay region to deal with DMA
+  mmio_dma_rx_buf_0:
+    # Setting the 'overlay' attribute will enable this functionality
+    overlay: true
+    # We use an address in the RAM region with the size of a DMA buffer
+    base_addr: 0x20000BA0
+    permissions: rw-
+    size: 140
+
+# (optional)
+# Explicit Initial SP / PC values
+# Base register values can be given explicitly instead of using the 'is_entry'
+# attribute on a memory region or having only a singular backing file
+entry_point: 0x80BFC
+initial_sp: 0x20088000
+
+###########################
+# OPTIONAL CONFIGURATIONS #
+###########################
+# If we know symbols, we can add them here (or have them generated from an ELF file, if present)
+symbols:
+  0x000000000800554e: ErrorHandler
+  0x0000000008005568: puts
+  0x00000000080057bc: printf
+  0x0000000008007298: idle_loop
+  0x000000000800a580: activate_uart_peripheral
+  0x000000000800b3f0: log_error
+# These symbols can be used by different pieces of functionality:
+# 1. The --debug -t option to dump function traces
+# 2. The --debug -b option to set breakpoints on symbols
+# 3. In other configuration options instead of hardcoded addresses (see below)
+
+# We can specify at which point(s) in firmware execution to stop an emulation run
+exit_at:
+  # By raw address
+  some_err_handler: 0x000000000800554e
+  # By symbol (requires the 'symbols' config shown above)
+  some_other_err_handler: ErrorHandler
+
+# Skip or handle specific places in firmware code
+handlers:
+  # Skip function execution entirely. This can be useful for MMIO-intensive or slow functionality
+  # which is not important for emulation. For example: output functions such as puts or non-exploitable printfs
+  # a) skip function by addr
+  function_to_be_skipped_by_hardcoded_addr:
+    # Specify the location in firmware code to intercept
+    addr: 0x08019178
+  # b) skip function by symbol
+  function_to_be_skipped_by_symbol:
+    # Or by location
+    addr: printf
+  # c) if 'addr' is omitted, the name of the entry itself is used as a symbol (in this case: 'printf')
+  printf:
+    # No attributes: skip printf entirely (a ret instruction is injected in this position)
+
+  # Handle with a high-level handler
+  # For an extensive use of such handlers, see https://github.com/ucsb-seclab/hal-fuzz
+  # WARNING: if used in fuzzing, Python-based handlers slow down fuzzing a lot
+  puts:
+    handler: fuzzware_harness.user_hooks.generic.stdio.puts
+    # Still execute the original firmware function (defaults to True)
+    do_return: False
+
+  # Native hooks leading to binary patches
+  # Return 0
+  my_useless_initialization_function_requiring_zero:
+    # BEWARE: this requires 8 bytes of function body
+    handler: native.return_0x0
+  # Return 1
+  my_useless_initialization_function_requiring_nonzero:
+    # BEWARE: this requires 8 bytes of function body
+    handler: native.return_0x1
+  # And welcome to the dark side...
+  my_useless_initialization_function_requiring_binary_patch:
+    # manually patching "bx lr" as byte patch
+    handler: native.inline_asm_7047
+
+# We can configure interrupt behavior and can control different dimensions
+# 1. When to raise an interrupt (time-based or upon hitting a code location)
+# 2. What interrupt to raise (fixed, fuzzer-chosen, in rolling manner)
+# 3. How many times to raise the interrupt
+interrupt_triggers:
+  # Pend rolling interrupt numbers every 1000 ticks
+  # Rolling: 1st enabled, 2nd enabled, 3rd enabled, ..., last enabled, 1st enabled
+  # Recommended: Interrupts without fuzzer involvement
+  default_time_based_fixed_interval_round_robin:
+    # cyclic time-based
+    every_nth_tick: 1000
+    # choose among the currently enabled interrupts in a rolling manner
+    fuzz_mode: round_robin
+
+  # Give fuzzer control over which interrupt to raise
+  # Allows for additional flexibility while consuming moderate amounts of fuzzing input
+  time_based_fixed_interval_fuzzer_chosen_irqs:
+    # cyclic time-based
+    every_nth_tick: 1000
+    # choose among the currently enabled interrupts in a rolling manner
+    fuzz_mode: round_robin
+  
+  # Fuzzer chosen interrupt is pended whenever symbol 'idle_loop' is hit
+  # Recommended in case idle loop is known and firmware is busy outside idle loop
+  location_based_fuzzer_chosen:
+    # whenever symbol is hit in firmware code
+    addr: idle_loop
+    # Alternative: address literal
+    # addr: 0xdeadbeef
+    # let the fuzzer choose among currently enabled interrupts
+    # the choice is made based on the fuzzer's next input byte
+    fuzz_mode: fuzzed
+
+  # Pend interrupt 20 every 1000 ticks
+  # Recommended when a specific interrupts is targeted
+  time_based_fixed_irq:
+    # time-based
+    every_nth_tick: 1000
+    # fixed irq number
+    irq: 20
+
+  # Pend interrupt 30 whenever address 0x08005888 is hit during emulation
+  location_based_fixed_irq:
+    # location_based
+    addr: 0x08005888
+    # fixed irq number
+    irq: 30
+
+  # Fuzzer chosen interrupt timing, rolling interrupts
+  time_based_fuzzed_interval_round_robin:
+    # fuzzer-chosen time-based
+    every_nth_tick: fuzzed
+    # choose among the currently enabled interrupts in a rolling manner
+    fuzz_mode: round_robin
+
+  # Let fuzzer choose time and interrupt
+  # However: This will consume a lot of fuzzing input
+  fully_fuzzed:
+    every_nth_tick: fuzzed
+    fuzz_mode: fuzzed
+
+  # Optional generic attributes can be set with different defaults:
+  # Pend a specified amount of times (defaults to 1)
+  # num_pends: 1
+  # Skip the trigger a specified amount of times (defaults to 0)
+  # num_skips: 1
+
+  # More examples
+  my_fuzzer_driven_interrupt_trigger:
+    addr: 0x080124A0
+    fuzz_mode: fuzzed # choose among enabled irqs based on fuzzer input byte
+  my_fixed_interrupt_trigger:
+    addr: 0x080124A0
+    irq: 24
+  my_num_skipping_fixed_interrupt_trigger:
+    addr: 0x080124A0
+    irq: 24
+    num_skips: 1
+  my_fixed_multi_interrupt_trigger:
+    addr: 0x080124A0
+    irq: 24
+    num_pends: 5
+  my_round_robin_interrupt_trigger:
+    addr: 0x080124A0
+    fuzz_mode: round_robin # trigger enabled irqs in round robin fashion
+
+
+#######################################
+#       BOOT LOGIC CONFIGURATION      #
+#######################################
+# We can guide pipeline-managed fuzzers in case complex boot logic is performed
+# We can tell the pipeline to look for important firmware basic blocks that need to
+# be taken (required) or are not allowed to be taken (avoid) for the boot to succeed.
+# This is especially useful if boot can partially fail where hardware peripherals can
+# be left unused in case some unexpected value / error condition was encountered.
+
+# Description of a successful boot process of the firmware image
+boot:
+  # A list of addresses required for a successful boot
+  required:
+    # An address (or symbol) in this list may indicate the if/else branch of a positive check
+    - 0x0800052A
+    # Or a function which activates a peripheral which is only called in case all checks were successful
+    - activate_uart_peripheral
+  # A list of addresses which indicate a failed boot
+  avoid:
+    # if/else branch of a failed check
+    - 0x08000518
+    # an error output function logging an error condition
+    - log_error
+  # Address at which the firmware is considered booted (successfully or unsuccessfully based on the previous config attributes)
+  target: idle
+# This configuration is used to derive a firmware state which is considered to be booted successfully and continue fuzzing from here
+
+
+#######################################
+#               LIMITS                #
+#######################################
+limits:
+  # Maximum number of translation blocks to execute before exiting emulation (0: no limit)
+  translation_blocks: 3000000
+  # Maximum number of translation blocks to execute while not consuming fuzz input (0: no limit)
+  fuzz_consumption_timeout: 150000
+  # Maximum number of interrupts to raise before exiting emulation (0: no limit)
+  interrupts: 3000
+  # Maximum number of trace events to record before exiting emulation (0: no limit)
+  trace_events: 0
+
+
+#######################################
+# MMIO ACCESS BEHAVIOR CONFIGURATIONS #
+#######################################
+
+# The default behavior upon MMIO access is to serve the full access by the fuzzer
+# This behavior can be modified by specifying different models.
+# The fuzzware pipeline automatically generates models for such accesses
+# An additional set of models can also be manually specified
+mmio_models:
+  # Serve a constant value upon access
+  constant:
+    pc_00000e98_mmio_4000c014:
+      # MMIO address which is accessed
+      addr: 0x4000c014
+      # PC address from which the MMIO register is accessed
+      pc: 0xe98
+      # The value to serve
+      val: 0x1
+
+  # Narrow the access down to a smaller access
+  bitextract:
+    pc_000001e2_mmio_0fe081fc:
+      # MMIO address which is accessed
+      addr: 0xfe081fc
+      # PC address from which the MMIO register is accessed
+      pc: 0x1e2
+      # The amount of fuzzing bytes to read
+      size: 0x1
+      # The amount of bits by which to shift the read value
+      left_shift: 0x10
+      # Bitwise mask is automatically generated by modeling engine but currently not used by the emulator
+      # mask: 0xff0000
+
+  # Treat accesses to this location just like ordinary memory
+  passthrough:
+    pc_00000a10_mmio_4002c000:
+      # MMIO address which is accessed
+      addr: 0x4002c000
+      # PC address from which the MMIO register is accessed
+      pc: 0xa10
+      # Initial value for the register to hold (defaults to 0)
+      init_val: 0x0
+
+  # Let the fuzzer choose from among a set of interesting values
+  set:
+    pc_00000b32_mmio_4000c004:
+      # MMIO address which is accessed
+      addr: 0x4000c004
+      # PC address from which the MMIO register is accessed
+      pc: 0xb32
+      # The set of values for the fuzzer to choose from
+      vals:
+      - 0x0
+      - 0x2
+  
+  # MMIO addresses which should explicitly be treated in the default way of letting the fuzzer provide the full value
+  unmodeled:
+    pc_00000ea4_mmio_4000c000:
+      # MMIO address which is accessed
+      addr: 0x4000c000
+      # PC address from which the MMIO register is accessed
+      pc: 0xea4
+
+################################
+#      MISC CONFIGURATIONS     #
+################################
+# de-activating different components / configurations
+use_exit_at: False     # this defaults to "True" if exit_at entries are used
+use_nvic: False        # this will be set to true in case components using it are configured
+use_systick: False      # defaults to True, the pipeline sets this to True after successful boot
+
+# Optionally, we can provide additional info about the nvic
+# Configuring this should usually not be required as firmware should configure the base address before enabling interrupts
+nvic:
+  # interrupt vector base address (alternative name: 'addr')
+  vtor: 0
+  # configure the maximum number of vectors in the nvic, defaults to 256
+  num_vecs: 256
+  # disable certain irq numbers
+  disabled_irqs:
+  # NOTE: these are external interrupts (16 and higher), i.e., specifying value "12" disables vector entry with index 16+12.
+  #       In the example, the affected interrupt handler address would be located at VTOR+4*(16+12)
+  - 12
+
+# We can specify timers to perform different actions during emulation periodically
+# WARNING: if used in fuzzing, Python-based handlers slow down fuzzing a lot
+timers:
+  # Call a high-level Python handler every 0x1000 ticks
+  my_test_timer:
+    reload_val: 0x1000
+    handler: fuzzware_harness.user_hooks.generic.hello
+    # Optional: Start timer at address in execution
+    start_at: 0x08000280

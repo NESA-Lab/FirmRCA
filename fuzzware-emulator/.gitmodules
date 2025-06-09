@@ -1,0 +1,3 @@
+[submodule "unicorn/fuzzware-unicorn"]
+	path = unicorn/fuzzware-unicorn
+	url = ../unicorn
