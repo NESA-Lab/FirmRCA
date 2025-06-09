@@ -1,4 +1,4 @@
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.15623400.svg)](https://doi.org/10.5281/zenodo.15623400) [![DOI](https://img.shields.io/github/license/NESA-Lab/FirmRCA.svg)](https://img.shields.io/github/license/NESA-Lab/FirmRCA.svg) ![Static Badge](https://img.shields.io/badge/IEEE%20S%26P-10.1109%2FSP61157.2025.00002-green)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.15623400.svg)](https://doi.org/10.5281/zenodo.15623400) [![DOI](https://img.shields.io/github/license/NESA-Lab/FirmRCA.svg)](https://github.com/NESA-Lab/FirmRCA?tab=GPL-3.0-1-ov-file) [![Static Badge](https://img.shields.io/badge/IEEE%20S%26P-10.1109%2FSP61157.2025.00002-green)](https://www.computer.org/csdl/proceedings-article/sp/2025/223600a002/21B7PVDny6I)
 
 # FirmRCA
 
