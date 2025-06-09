@@ -1,9 +1,4 @@
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.15623400.svg)](https://doi.org/10.5281/zenodo.15623400) [![DOI](https://img.shields.io/github/license/NESA-Lab/FirmRCA.svg)](https://img.shields.io/github/license/NESA-Lab/FirmRCA.svg)
-
-
-# NOTE
-
-During the development of FirmRCA, footprint collection and root cause analysis were carried out sequentially on two separate servers. However, the server responsible for footprint collection suffered a hard drive failure. As a result, the version of fuzzware used by the current repository’s fuzzware-emulator is uncertain, which may introduce potential instability in the experimental results.
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.15623400.svg)](https://doi.org/10.5281/zenodo.15623400) [![DOI](https://img.shields.io/github/license/NESA-Lab/FirmRCA.svg)](https://img.shields.io/github/license/NESA-Lab/FirmRCA.svg) ![Static Badge](https://img.shields.io/badge/IEEE%20S%26P-10.1109%2FSP61157.2025.00002-green)
 
 # FirmRCA
 
@@ -11,9 +6,9 @@ Embedded Firmware Root Cause Analysis.
 
 This repo contains the source code of the paper "FirmRCA: Towards Post-Fuzzing Analysis on ARM Embedded Firmware with Efficient Event-based Fault Localization"
 
-## Note
+## NOTE
 
-**This is a preview version before camera-ready.**
+*During the development of FirmRCA, footprint collection and root cause analysis were carried out sequentially on two separate servers. However, the server responsible for footprint collection suffered a hard drive failure. As a result, the version of fuzzware used by the current repository’s fuzzware-emulator is uncertain, which may introduce potential instability in the experimental results.*
 
 ## How to Install
 
