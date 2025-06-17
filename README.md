@@ -76,7 +76,7 @@ cp ./libcapnproto.so ../src/lib
 
 Step 4. Compile the project binary
 
-Note that you should comment/uncomment the settings in Makefile.am.
+Note that you should comment/uncomment the settings in `Makefile.am`.
 
 ```shell
 cd ./src
@@ -86,9 +86,11 @@ cd src
 make
 ```
 
+If something wrong occurs when running `./configure`, please make sure these compilation files use LF instead of CRLF. You can also check [POMP](https://github.com/junxzm1990/pomp) for installation reference.
+
 ## Dataset 
 
-Currently, we prepare 3 testsuites as a demo. You can download full dataset from [10.5281/zenodo.15623399](https://doi.org/10.5281/zenodo.15623399). 
+We prepare 3 testsuites as a demo in the `testsuites-demo.zip` file. You can download full dataset from [10.5281/zenodo.15623399](https://doi.org/10.5281/zenodo.15623399). 
 
 If you want to generate more testcases, you can prepare your files like this:
 
@@ -104,7 +106,7 @@ If you want to generate more testcases, you can prepare your files like this:
 
 ```
 
-`<something-your-bin-name1>` should be a key in `config.yml`. You should also specify `bin_load_addr` that loads the binary.
+`<something-your-bin-name1>` should be the value of the `name` key in `config.yml`. You should also specify `bin_load_addr` that loads the binary.
 
 Then please refer to [fuzzware-fuzzer](https://github.com/fuzzware-fuzzer/fuzzware-emulator) to setup the environment. Please do not clone the their repository in that the unicorn version may be different. Use the fuzzware-emulator in this repository, instead.
 
