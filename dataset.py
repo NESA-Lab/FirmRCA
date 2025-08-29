@@ -60,7 +60,9 @@ def generate_dataset():
     # command_no_event     = 'fuzzware emu crashing_input > _nouse'
     # command_action_event = 'fuzzware emu crashing_input --trace-out=trace-out.txt --state-out=state-out.txt --action-event > _nouse'
     # command_data_event   = 'fuzzware emu crashing_input --trace-out=trace-out.txt --state-out=state-out.txt --data-event > _nouse'
-    command_both_events  = 'fuzzware emu crashing_input --trace-out=trace-out.txt --state-out=state-out.txt --action-event --data-event > _nouse'
+    # command_both_events  = 'fuzzware emu crashing_input --trace-out=trace-out.txt --state-out=state-out.txt --action-event --data-event > _nouse'
+    # 2025.08.29 update: action-event and data-event are used in evaluation. they are activated by default now.
+    command_both_events = 'fuzzware emu crashing_input --trace-out=trace-out.txt --state-out=state-out.txt > crash-log.txt'
     cnt = 0
     for root, dirs, _ in os.walk(os.getcwd()):
         for dir in dirs:
@@ -100,3 +102,4 @@ if __name__ == '__main__':
     # In `config.yml`, you should have a list of dictionaries with at least 'name' and 'bin_load_addr'.
     # You can see the current config file as an example.
     generate_dataset()
+
