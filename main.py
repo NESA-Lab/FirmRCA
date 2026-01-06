@@ -6,6 +6,7 @@ import os
 import yaml
 import subprocess
 import datetime
+import argparse
 from multiprocessing import Process, Semaphore
 
 exp_timeout = 48 * 3600
@@ -59,17 +60,13 @@ ground_truth = {
     }
 
 test_env = {
-    'baseline-nolog' : {
-        'env' : 'export LD_LIBRARY_PATH= && ',
-        'program' : f' timeout {exp_timeout} ./pomp/src/reversenolog' 
-    },
-    'baseline-log' : {
-        'env' : 'export LD_LIBRARY_PATH= && ',
-        'program' : f' timeout {exp_timeout} ./pomp/src/reverselog'
-    },
-    'capnproto-nolog' : {
+    'capnproto-nolog' : { # Best choice.
         'env' : 'export LD_LIBRARY_PATH=./src/lib && ',
         'program' : f' timeout {exp_timeout} ./src/src/reversenolog'
+    },
+    'capnproto-log' : { # Secondary choice.
+        'env' : 'export LD_LIBRARY_PATH=./src/lib && ',
+        'program' : f' timeout {exp_timeout} ./src/src/reverselog'
     },
     'capnproto-nolog-ablation1' : {
         'env' : 'export LD_LIBRARY_PATH=./src/lib && ',
@@ -83,9 +80,14 @@ test_env = {
         'env' : 'export LD_LIBRARY_PATH=./src/lib && ',
         'program' : f' timeout {exp_timeout} ./src/src/ablation3'
     },
-    'capnproto-log' : {
-        'env' : 'export LD_LIBRARY_PATH=./src/lib && ',
-        'program' : f' timeout {exp_timeout} ./src/src/reverselog'
+
+    'baseline-nolog' : {
+        'env' : 'export LD_LIBRARY_PATH= && ',
+        'program' : f' timeout {exp_timeout} ./pomp/src/reversenolog' 
+    },
+    'baseline-log' : {
+        'env' : 'export LD_LIBRARY_PATH= && ',
+        'program' : f' timeout {exp_timeout} ./pomp/src/reverselog'
     },
     'compare-deepvsa-vsa-nolog': {
         'env' : 'export LD_LIBRARY_PATH=./pompplusplus/lib && ',
@@ -96,6 +98,32 @@ test_env = {
         'program' : f' timeout {exp_timeout} ./pompplusplus/src/reverselog'
     },
 }
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Command line argument parser")
+
+    parser.add_argument(
+        "--name",
+        type=str,
+        help="Target test case name. This should be recorded in config.yml."
+    )
+
+    parser.add_argument(
+        "--depth",
+        type=float,
+        default=1,
+        help="Maximum line count. If larger than 1, FirmRCA will analyze at most of these instructions before the crash. Otherwise, FirmRCA will analyze at most the ratio of all instructions."
+    )
+
+    parser.add_argument(
+        "--setting",
+        type=str,
+        choices=list(test_env.keys()),
+        default="capnproto-nolog",
+        help=f"Setting mode. Default: capnproto-nolog)"
+    )
+
+    return parser.parse_args()
 
 # load yaml config
 
@@ -150,12 +178,13 @@ def run_single_rca(target,exp_env,line):
             else:
                 run_exp_command = f'{test_env[exp_env]["env"]} {test_env[exp_env]["program"]} {core_dump} {binary_file} {inv_trace_file} {memac_file} {start_addr} {max_rev_ins_num} {root_cause_rev_idx} > {output_log}'
             try:
-                p = Process(target=do_execute, args=(run_exp_command, sem))
-                p.start()
-                global_jobs.append(p)
+                do_execute(run_exp_command, sem)
                 # print(run_exp_command)
             except KeyboardInterrupt as e:
                 break
+            break
+    else:
+        print(f'Target not found: `{target}`. Please check config.yml.')
 
 def run_multiple_rca(exp_env, line):
     config = load_target_yml('config.yml')
@@ -315,9 +344,12 @@ def exp_repeat_test_overhead_lastN(target,settings,sub_dir):
 
 
 def debug():
-    run_single_rca('contiki-ng-54','capnproto-log',1)
-
+    run_single_rca('p2im-12','capnproto-log',1)
 
 if __name__ == '__main__':
-    debug()
+    args = parse_args()
+    if args.name:
+        run_single_rca(args.name, args.setting, args.depth)
+    else:
+        debug()
     

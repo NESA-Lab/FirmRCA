@@ -1,7 +1,5 @@
 __pycache__/
-data/
-toolchain/
-filelink/
+*.venv/
 *.pkl
 *.tex
 *.tar
@@ -13,12 +11,12 @@ filelink/
 *.out
 .gdb_history
 .vscode/
+testsuites/**
+!testsuites/testsuites-demo.zip
 reversenolog
 reverselog
-reversecapnpnolog
-reversecapnplog
-*.png
 ablation1
 ablation2
 ablation3
+*.png
 *.pdf

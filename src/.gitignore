@@ -36,17 +36,12 @@
 # Swap files
 *.swp
 
-# Own executable
-src/reverse
-
 # Too big file
 testsuites/pscp/core
 testsuites/coreutils/core
 testsuites/uniq/core
 testsuites/join/core
 testsuites/gdb/core
-testreverselog.txt
-testreverselog.txt.p2im12
 
 # Temp file in configure/make
 Makefile
@@ -66,3 +61,5 @@ compile
 config.h.in
 install-sh
 missing
+config.guess
+config.sub

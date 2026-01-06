@@ -1,8 +1,8 @@
 AUTOMAKE_OPTIONS = -Wno-error
 
 handlers_FILES  = handler_arm.c
-bin_PROGRAMS    = reversenolog reverselog ablation1 ablation2 ablation3
-#bin_PROGRAMS    = reverselog
+#bin_PROGRAMS    = reversenolog reverselog ablation1 ablation2 ablation3
+bin_PROGRAMS    = reverselog reversenolog
 capnproto_FILES = bintrace.capnp.c
 
 # capnp    | reverse-capnproto-nolog-noassert.elf | experiment

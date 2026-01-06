@@ -48,6 +48,7 @@ def dump_reverse_list(filename):
     with open('instlist.reverse', 'w', encoding = 'utf8') as f:
         for data in instlist[::-1]:
             print(data, file = f)
+    # 2026.1.6 Although we generate loglist.reverse, it is just used for comparison and is not used by FirmRCA.
     with open('loglist.reverse','w', encoding = 'utf8') as f:
         for data in reglist[::-1]:
             print(data, file=f)
